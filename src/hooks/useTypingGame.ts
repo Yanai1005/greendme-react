@@ -38,14 +38,11 @@ export const useTypingGame = (initialText: string): UseTypingGameReturn => {
         resetGame();
     }, []);
 
-    // 入力処理
     const handleInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
         const newInput = e.target.value;
 
-        // ゲームが終了していたら何もしない
         if (endTime) return;
 
-        // 最初の入力で開始時間を設定
         if (!startTime && newInput.length > 0) {
             setStartTime(Date.now());
             setIsRunning(true);
@@ -53,8 +50,6 @@ export const useTypingGame = (initialText: string): UseTypingGameReturn => {
 
         setInput(newInput);
 
-        // 進捗と正誤の計算
-        const currentText = text.substring(0, newInput.length);
         let correctChars = 0;
         let incorrectChars = 0;
 
@@ -79,14 +74,12 @@ export const useTypingGame = (initialText: string): UseTypingGameReturn => {
 
         setProgress(newProgress);
 
-        // ゲーム終了判定
         if (newInput === text) {
             setEndTime(Date.now());
             setIsRunning(false);
         }
     }, [text, startTime, endTime]);
 
-    // リセット処理
     const resetGame = useCallback(() => {
         setInput('');
         setStartTime(null);
@@ -97,34 +90,27 @@ export const useTypingGame = (initialText: string): UseTypingGameReturn => {
         setElapsedTime(0);
     }, []);
 
-    // WPM (Words Per Minute) 計算
     const calculateWPM = useCallback((): number => {
         if (!startTime) return 0;
 
         const currentTime = endTime || Date.now();
 
-        // 日本語の場合は文字数÷5で単語数とみなすことが多い
         const wordCount = text.length / 5;
         const minutes = (currentTime - startTime) / 1000 / 60;
 
         if (minutes === 0) return 0;
 
         if (endTime) {
-            // ゲーム終了時はフルテキストでの計算
             return Math.round(wordCount / minutes);
         } else {
-            // ゲーム実行中は入力済み部分での計算
             return Math.round(wordCount * (input.length / text.length) / minutes);
         }
     }, [text, input, startTime, endTime]);
-
-    // 正確度計算 (%)
     const calculateAccuracy = useCallback((): number => {
         if (charStats.total === 0) return 100;
         return Math.round((charStats.correct / charStats.total) * 100);
     }, [charStats]);
 
-    // タイマー更新
     useEffect(() => {
         let timerId: number | undefined;
 
