@@ -10,10 +10,7 @@ interface WebRTCData {
     candidates: RTCIceCandidate[];
 }
 
-interface GameMessage {
-    type: string;
-    [key: string]: any;
-}
+
 
 export class SimpleP2P {
     private peerConnection: RTCPeerConnection = new RTCPeerConnection();
