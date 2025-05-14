@@ -10,15 +10,27 @@ interface WebRTCData {
     candidates: RTCIceCandidate[];
 }
 
+interface GameMessage {
+    type: string;
+    [key: string]: any;
+}
+
 export class SimpleP2P {
-    private peerConnection: RTCPeerConnection;
+    private peerConnection: RTCPeerConnection = new RTCPeerConnection();
     private dataChannel: RTCDataChannel | null = null;
     private iceCandidates: RTCIceCandidate[] = [];
     private messageQueue: string[] = [];
     private connectionReady = false;
     private messageListeners: ((message: string) => void)[] = [];
+    private connectionTimeoutId: NodeJS.Timeout | null = null;
+    private connectionAttempts = 0;
+    private maxConnectionAttempts = 3;
 
     constructor() {
+        this.initializePeerConnection();
+    }
+
+    private initializePeerConnection() {
         const configuration: RTCConfiguration = {
             iceServers: [
                 {
@@ -47,30 +59,135 @@ export class SimpleP2P {
             }
         };
 
+        this.peerConnection.onicegatheringstatechange = () => {
+            console.log('ICE gathering state:', this.peerConnection.iceGatheringState);
+            if (this.peerConnection.iceGatheringState === 'complete') {
+                console.log('ICE gathering complete with', this.iceCandidates.length, 'candidates');
+            }
+        };
+
         this.peerConnection.onconnectionstatechange = () => {
-            console.log('Connection state:', this.peerConnection.connectionState);
+            console.log('Connection state changed to:', this.peerConnection.connectionState);
+
             // 接続状態が変わったときに通知
             if (this.peerConnection.connectionState === 'connected') {
+                if (this.connectionTimeoutId) {
+                    clearTimeout(this.connectionTimeoutId);
+                    this.connectionTimeoutId = null;
+                }
                 this.processMessageQueue();
+            } else if (this.peerConnection.connectionState === 'failed') {
+                if (this.connectionAttempts < this.maxConnectionAttempts) {
+                    console.log(`Connection failed. Retrying (${this.connectionAttempts + 1}/${this.maxConnectionAttempts})...`);
+                    this.reconnect();
+                }
             }
         };
 
         this.peerConnection.oniceconnectionstatechange = () => {
-            console.log('ICE connection state:', this.peerConnection.iceConnectionState);
+            console.log('ICE connection state changed to:', this.peerConnection.iceConnectionState);
+
+            if (this.peerConnection.iceConnectionState === 'disconnected' ||
+                this.peerConnection.iceConnectionState === 'failed') {
+                if (this.connectionAttempts < this.maxConnectionAttempts) {
+                    console.log(`ICE connection failed. Retrying (${this.connectionAttempts + 1}/${this.maxConnectionAttempts})...`);
+                    this.reconnect();
+                }
+            }
         };
+    }
+
+    private reconnect() {
+        this.connectionAttempts++;
+
+        // 既存の接続をクリーンアップ
+        if (this.dataChannel) {
+            this.dataChannel.close();
+            this.dataChannel = null;
+        }
+
+        this.peerConnection.close();
+        this.iceCandidates = [];
+
+        // 新しい接続を初期化
+        this.initializePeerConnection();
+
+        // 再接続のコールバックを通知
+        this.messageListeners.forEach(listener => {
+            try {
+                listener(JSON.stringify({ type: 'connectionRetry', attempt: this.connectionAttempts }));
+            } catch (error) {
+                console.error('Error notifying connection retry:', error);
+            }
+        });
+    }
+
+    private setConnectionTimeout() {
+        if (this.connectionTimeoutId) {
+            clearTimeout(this.connectionTimeoutId);
+        }
+
+        // 30秒のタイムアウトを設定
+        this.connectionTimeoutId = setTimeout(() => {
+            if (this.peerConnection.connectionState !== 'connected' &&
+                this.peerConnection.iceConnectionState !== 'connected' &&
+                (!this.dataChannel || this.dataChannel.readyState !== 'open')) {
+
+                console.log('Connection timeout. Connection state:', this.peerConnection.connectionState);
+                console.log('ICE connection state:', this.peerConnection.iceConnectionState);
+                console.log('Data channel state:', this.dataChannel?.readyState || 'null');
+
+                if (this.connectionAttempts < this.maxConnectionAttempts) {
+                    console.log(`Connection timed out. Retrying (${this.connectionAttempts + 1}/${this.maxConnectionAttempts})...`);
+                    this.reconnect();
+                } else {
+                    // 最大試行回数に達した場合、失敗を通知
+                    this.messageListeners.forEach(listener => {
+                        try {
+                            listener(JSON.stringify({
+                                type: 'connectionFailed',
+                                reason: 'Connection timeout after multiple attempts'
+                            }));
+                        } catch (error) {
+                            console.error('Error notifying connection failure:', error);
+                        }
+                    });
+                }
+            }
+        }, 30000); // 30秒
     }
 
     async createOffer(): Promise<WebRTCData> {
         try {
-            this.dataChannel = this.peerConnection.createDataChannel('gameChannel');
+            this.connectionAttempts = 0;
+            this.setConnectionTimeout();
+
+            this.dataChannel = this.peerConnection.createDataChannel('gameChannel', {
+                ordered: true  // 順序付きデータチャネル
+            });
             this.setupDataChannel();
 
-            const offer = await this.peerConnection.createOffer();
+            const offer = await this.peerConnection.createOffer({
+                offerToReceiveAudio: false,
+                offerToReceiveVideo: false
+            });
             console.log('Created offer:', offer);
             await this.peerConnection.setLocalDescription(offer);
 
-            // ICE candidateの収集を待つ
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // ICE candidateの収集を待つ - より多くの候補を収集するために待機時間を増やす
+            await new Promise(resolve => {
+                const checkIceCandidates = () => {
+                    if (this.peerConnection.iceGatheringState === 'complete') {
+                        resolve(null);
+                    } else if (this.iceCandidates.length >= 5) {
+                        // 十分な数のICE候補が集まったら続行
+                        setTimeout(resolve, 1000);
+                    } else {
+                        setTimeout(checkIceCandidates, 500);
+                    }
+                };
+                setTimeout(checkIceCandidates, 500);
+            });
 
             const offerData: ConnectionData = {
                 type: 'offer',
@@ -102,9 +219,15 @@ export class SimpleP2P {
             await this.peerConnection.setRemoteDescription(answerDesc);
             console.log('Remote description set successfully');
 
+            // ICE candidateの追加 - 順番にプロセス
             for (const candidate of data.candidates) {
-                console.log('Adding ICE candidate:', candidate);
-                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                try {
+                    console.log('Adding ICE candidate:', candidate);
+                    await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                } catch (error) {
+                    console.warn('Error adding ICE candidate:', error);
+                    // 個別のICE候補の追加に失敗しても続行
+                }
             }
         } catch (error) {
             console.error('Error handling answer:', error);
@@ -114,6 +237,9 @@ export class SimpleP2P {
 
     async joinRoom(data: WebRTCData): Promise<WebRTCData> {
         try {
+            this.connectionAttempts = 0;
+            this.setConnectionTimeout();
+
             if (!data.offer || !data.offer.sdp) {
                 throw new Error('Invalid offer data received');
             }
@@ -126,9 +252,15 @@ export class SimpleP2P {
 
             await this.peerConnection.setRemoteDescription(offerDesc);
 
+            // ICE candidateの追加 - 順番にプロセス
             for (const candidate of data.candidates) {
-                console.log('Adding ICE candidate:', candidate);
-                await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                try {
+                    console.log('Adding ICE candidate:', candidate);
+                    await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+                } catch (error) {
+                    console.warn('Error adding ICE candidate:', error);
+                    // 個別のICE候補の追加に失敗しても続行
+                }
             }
 
             this.peerConnection.ondatachannel = (event: RTCDataChannelEvent) => {
@@ -140,8 +272,20 @@ export class SimpleP2P {
             console.log('Created answer:', answer);
             await this.peerConnection.setLocalDescription(answer);
 
-            // ICE candidateの収集を待つ
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            // ICE candidateの収集を待つ - より多くの候補を収集するために待機時間を増やす
+            await new Promise(resolve => {
+                const checkIceCandidates = () => {
+                    if (this.peerConnection.iceGatheringState === 'complete') {
+                        resolve(null);
+                    } else if (this.iceCandidates.length >= 5) {
+                        // 十分な数のICE候補が集まったら続行
+                        setTimeout(resolve, 1000);
+                    } else {
+                        setTimeout(checkIceCandidates, 500);
+                    }
+                };
+                setTimeout(checkIceCandidates, 500);
+            });
 
             const answerData: ConnectionData = {
                 type: 'answer',
@@ -170,6 +314,21 @@ export class SimpleP2P {
 
             // 待機中のメッセージがあれば処理
             this.processMessageQueue();
+
+            // タイムアウトをクリア
+            if (this.connectionTimeoutId) {
+                clearTimeout(this.connectionTimeoutId);
+                this.connectionTimeoutId = null;
+            }
+
+            // 接続成功を通知
+            this.messageListeners.forEach(listener => {
+                try {
+                    listener(JSON.stringify({ type: 'connectionSuccess' }));
+                } catch (error) {
+                    console.error('Error notifying connection success:', error);
+                }
+            });
         };
 
         this.dataChannel.onclose = () => {

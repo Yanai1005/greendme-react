@@ -14,9 +14,37 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
     const [error, setError] = useState<string | null>(null);
     const [isAnswerReceived, setIsAnswerReceived] = useState(false);
     const [isConnectionReady, setIsConnectionReady] = useState(false);
+    const [retryCount, setRetryCount] = useState(0);
 
     // 接続状態を監視
     useEffect(() => {
+        const handleConnectionMessages = (message: string) => {
+            try {
+                const data = JSON.parse(message);
+                console.log('Connection message:', data);
+
+                if (data.type === 'connectionSuccess') {
+                    setConnectionStatus('Connection established! Moving to game...');
+                    setTimeout(() => {
+                        onConnectionEstablished(p2p);
+                    }, 1000);
+                }
+                else if (data.type === 'connectionFailed') {
+                    setError(`Connection failed: ${data.reason || 'Unknown error'}`);
+                    setConnectionStatus('Connection failed');
+                    setIsConnectionReady(false);
+                }
+                else if (data.type === 'connectionRetry') {
+                    setRetryCount(data.attempt);
+                    setConnectionStatus(`Connection attempt ${data.attempt}... Please wait`);
+                }
+            } catch (error) {
+                // JSONではないメッセージは無視
+            }
+        };
+
+        p2p.onMessage(handleConnectionMessages);
+
         if (isConnectionReady) {
             const checkConnectionInterval = setInterval(() => {
                 const dataChannelState = p2p.getDataChannelState();
@@ -33,15 +61,18 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
                         onConnectionEstablished(p2p);
                     }, 1000);
                 } else if (connectionState === 'failed' || connectionState === 'disconnected' || connectionState === 'closed') {
-                    clearInterval(checkConnectionInterval);
-                    setError('Connection failed. Please try again.');
-                    setConnectionStatus('Connection failed');
+                    if (retryCount >= 3) {
+                        clearInterval(checkConnectionInterval);
+                        setError('Connection failed after multiple attempts. Please try again with a new connection.');
+                        setConnectionStatus('Connection failed');
+                        setIsConnectionReady(false);
+                    }
                 }
-            }, 1000);
+            }, 2000);
 
             return () => clearInterval(checkConnectionInterval);
         }
-    }, [isConnectionReady, p2p, onConnectionEstablished]);
+    }, [isConnectionReady, p2p, onConnectionEstablished, retryCount]);
 
     // 接続確立のテスト用メッセージを送信
     const sendConnectionTest = () => {
@@ -83,6 +114,7 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
                 throw new Error('Invalid connection info format. Please check the data and try again.');
             }
 
+            setConnectionStatus('Joining room... Please wait');
             console.log('Joining with data:', parsedData);
             const responseData = await p2p.joinRoom(parsedData);
             console.log('Join response data:', responseData);
@@ -94,7 +126,7 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
 
             // 接続テストメッセージを定期的に送信
             const testInterval = setInterval(sendConnectionTest, 2000);
-            setTimeout(() => clearInterval(testInterval), 10000);
+            setTimeout(() => clearInterval(testInterval), 30000);
         } catch (error) {
             console.error('Error joining room:', error);
             setConnectionStatus('Error joining room');
@@ -114,6 +146,7 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
                 throw new Error('Invalid connection info format. Please check the data and try again.');
             }
 
+            setConnectionStatus('Setting up connection... Please wait');
             console.log('Handling answer data:', parsedData);
             await p2p.handleAnswer(parsedData);
             setConnectionStatus('Processing connection...');
@@ -123,11 +156,25 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
 
             // 接続テストメッセージを定期的に送信
             const testInterval = setInterval(sendConnectionTest, 2000);
-            setTimeout(() => clearInterval(testInterval), 10000);
+            setTimeout(() => clearInterval(testInterval), 30000);
         } catch (error) {
             console.error('Error handling answer:', error);
             setConnectionStatus('Error establishing connection');
             setError(error instanceof Error ? error.message : 'Unknown error');
+        }
+    };
+
+    const handleRetryConnection = () => {
+        setError(null);
+        setRetryCount(0);
+        setConnectionInfo('');
+        setIsConnectionReady(false);
+        setIsAnswerReceived(false);
+
+        if (isCreatingRoom) {
+            handleCreateRoom();
+        } else if (isJoiningRoom) {
+            setIsJoiningRoom(true);
         }
     };
 
@@ -136,6 +183,8 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
             return 'text-red-500';
         } else if (connectionStatus.includes('Connected') || connectionStatus.includes('established')) {
             return 'text-green-500';
+        } else if (connectionStatus.includes('attempt')) {
+            return 'text-yellow-500';
         }
         return 'text-blue-500';
     };
@@ -169,8 +218,17 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
                         </div>
                     )}
                     {error && (
-                        <div className="text-red-500 text-center font-semibold">
+                        <div className="text-red-500 text-center font-semibold bg-red-50 p-3 rounded border border-red-200">
                             {error}
+                            <div className="mt-2">
+                                <button
+                                    type="button"
+                                    onClick={handleRetryConnection}
+                                    className="mt-2 bg-red-500 text-white px-4 py-1 rounded hover:bg-red-600 transition-colors"
+                                >
+                                    Retry Connection
+                                </button>
+                            </div>
                         </div>
                     )}
                     {isCreatingRoom && !isAnswerReceived && (
@@ -198,7 +256,7 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
                         </div>
                     )}
 
-                    {!isConnectionReady && (
+                    {!isConnectionReady && !error && (
                         <button
                             type="submit"
                             className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors"
@@ -207,7 +265,7 @@ export const RoomSetup: React.FC<RoomSetupProps> = ({ onConnectionEstablished })
                         </button>
                     )}
 
-                    {isConnectionReady && (
+                    {isConnectionReady && !error && (
                         <div className="text-center">
                             <p className="text-blue-500 animate-pulse">
                                 Establishing connection... Please wait.
