@@ -1,64 +1,26 @@
 import { useState } from 'react';
-import TypingGame from './components/game/TypingGame';
-import MultiplayerPage from './pages/MultiplayerPage';
+import { RoomSetup } from './components/RoomSetup';
+import { MultiplayerGame } from './components/MultiplayerGame';
+import { SimpleP2P } from './services/SimpleP2P';
 
-const App = () => {
-  const [mode, setMode] = useState<'single' | 'multiplayer'>('single');
-  const [playerName, setPlayerName] = useState<string>('ゲスト');
-  const [playerId] = useState<string>(() => {
-    const storedId = localStorage.getItem('playerId');
-    if (storedId) return storedId;
+function App() {
+  const [p2p, setP2P] = useState<SimpleP2P | null>(null);
 
-    const newId = `player_${Math.random().toString(36).substring(2, 9)}`;
-    localStorage.setItem('playerId', newId);
-    return newId;
-  });
+  const handleConnectionEstablished = (connection: SimpleP2P) => {
+    setP2P(connection);
+  };
 
   return (
-    <div>
-      <header>
-        <h1>タイピングスキル向上ゲーム</h1>
-        <div>
-          <label>
-            プレイヤー名:
-            <input
-              type="text"
-              value={playerName}
-              onChange={(e) => setPlayerName(e.target.value)}
-              placeholder="プレイヤー名"
-            />
-          </label>
-        </div>
-        <div>
-          <button
-            onClick={() => setMode('single')}
-            style={{ fontWeight: mode === 'single' ? 'bold' : 'normal' }}
-          >
-            シングルプレイ
-          </button>
-          <button
-            onClick={() => setMode('multiplayer')}
-            style={{ fontWeight: mode === 'multiplayer' ? 'bold' : 'normal' }}
-          >
-            マルチプレイ
-          </button>
-        </div>
-      </header>
+    <div className="container mx-auto max-w-2xl p-4">
+      <h1 className="text-3xl font-bold mb-8 text-center">Multiplayer Game</h1>
 
-      {mode === 'single' ? (
-        <TypingGame />
+      {!p2p ? (
+        <RoomSetup onConnectionEstablished={handleConnectionEstablished} />
       ) : (
-        <MultiplayerPage
-          playerId={playerId}
-          playerName={playerName}
-        />
+        <MultiplayerGame p2p={p2p} />
       )}
-
-      <footer>
-        <p>© 2025 GreenDMe タイピングゲーム</p>
-      </footer>
     </div>
   );
-};
+}
 
 export default App;
