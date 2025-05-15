@@ -2,6 +2,28 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
+    // 部屋のルール
+    match /rooms/{roomId} {
+      // 部屋の読み取り: 誰でも可能
+      allow read: if true;
+      
+      // 部屋の作成: 誰でも可能
+      allow create: if true;
+      
+      // 部屋の更新: 誰でも可能、かつ参加者は最大2人まで
+      allow update: if request.resource.data.participants.size() <= 2;
+      
+      // メッセージのルール
+      match /messages/{messageId} {
+        // メッセージの読み取り: 誰でも可能
+        allow read: if true;
+        
+        // メッセージの作成: 誰でも可能
+        allow create: if true;
+      }
+    }
+    
+    // その他のドキュメントはアクセス不可
     match /{document=**} {
       allow read, write: if false;
     }

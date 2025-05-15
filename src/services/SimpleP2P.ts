@@ -1,4 +1,3 @@
-// WebRTC types are now globally available in modern browsers
 interface ConnectionData {
     type: 'offer' | 'answer';
     sdp: string;
@@ -9,8 +8,6 @@ interface WebRTCData {
     answer?: ConnectionData;
     candidates: RTCIceCandidate[];
 }
-
-
 
 export class SimpleP2P {
     private peerConnection: RTCPeerConnection = new RTCPeerConnection();

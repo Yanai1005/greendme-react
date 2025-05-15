@@ -154,7 +154,6 @@ export const MultiplayerGame: React.FC<MultiplayerGameProps> = ({ p2p }) => {
 
         p2p.onMessage(handleGameMessages);
 
-        // クリーンアップ関数
         return () => {
             if (gameTimerRef.current) {
                 clearInterval(gameTimerRef.current);
