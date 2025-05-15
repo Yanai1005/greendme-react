@@ -62,10 +62,10 @@ export const createRoom = async (name: string, creatorId: string, gameType: stri
             name,
             createdAt: serverTimestamp(),
             participants: [creatorId],
-            maxParticipants: 2, // 最大2人まで
+            maxParticipants: 2,
             gameType,
             gameState: {
-                status: 'waiting', // waiting, ready, playing, finished
+                status: 'waiting',
                 players: {
                     [creatorId]: {
                         ready: false,
@@ -77,7 +77,7 @@ export const createRoom = async (name: string, creatorId: string, gameType: stri
         };
 
         await setDoc(newRoomRef, roomData);
-        console.log('Room created:', roomId, roomData); // デバッグ用
+        console.log('Room created:', roomId, roomData);
         return roomId;
     } catch (error) {
         console.error('Error creating room:', error);
@@ -100,32 +100,30 @@ export const joinRoom = async (roomId: string, userId: string): Promise<boolean>
         const roomData = roomSnap.data() as Room;
         console.log(`Room data:`, roomData);
 
-        // 既に参加している場合
-        if (roomData.participants.includes(userId)) {
+        const participants = Array.isArray(roomData.participants) ? roomData.participants : [];
+
+        if (participants.includes(userId)) {
             console.log(`User ${userId} is already in room ${roomId}`);
             return true;
         }
 
-        // 部屋が満員の場合
-        if (roomData.participants.length >= roomData.maxParticipants) {
-            console.error(`Room ${roomId} is full (${roomData.participants.length}/${roomData.maxParticipants})`);
+        if (participants.length >= (roomData.maxParticipants || 2)) {
+            console.error(`Room ${roomId} is full (${participants.length}/${roomData.maxParticipants || 2})`);
             throw new Error('Room is full');
         }
 
-        // 参加者を追加
         const gameState = roomData.gameState || {
             status: 'waiting',
             players: {}
         };
 
-        // 新しいプレイヤーの情報を追加
         gameState.players[userId] = {
             ready: false,
             score: 0,
             progress: 0
         };
 
-        const updatedParticipants = [...roomData.participants, userId];
+        const updatedParticipants = [...participants, userId];
         console.log(`Updating participants for room ${roomId}:`, updatedParticipants);
 
         await updateDoc(roomRef, {
@@ -141,15 +139,12 @@ export const joinRoom = async (roomId: string, userId: string): Promise<boolean>
     }
 };
 
-// ランダムマッチング（利用可能な部屋に参加、なければ新しい部屋を作成）
+// ランダムマッチング
 export const randomMatch = async (userId: string, userName: string): Promise<string> => {
     try {
-        // 利用可能な部屋を探す
         const availableRooms = await getAvailableRooms();
 
-        // 利用可能な部屋があればそこに参加
         if (availableRooms.length > 0) {
-            // ランダムに一つ選ぶ
             const randomIndex = Math.floor(Math.random() * availableRooms.length);
             const selectedRoom = availableRooms[randomIndex];
 
@@ -157,7 +152,6 @@ export const randomMatch = async (userId: string, userName: string): Promise<str
             return selectedRoom.id;
         }
 
-        // 利用可能な部屋がなければ新しい部屋を作成
         const roomName = `${userName}の部屋`;
         return await createRoom(roomName, userId, 'typing');
     } catch (error) {
@@ -166,7 +160,6 @@ export const randomMatch = async (userId: string, userName: string): Promise<str
     }
 };
 
-// 部屋から退出する
 export const leaveRoom = async (roomId: string, userId: string): Promise<boolean> => {
     try {
         const roomRef = doc(db, ROOMS_COLLECTION, roomId);
@@ -178,15 +171,15 @@ export const leaveRoom = async (roomId: string, userId: string): Promise<boolean
 
         const roomData = roomSnap.data() as Room;
 
-        // ゲーム状態を更新
+        const participants = Array.isArray(roomData.participants) ? roomData.participants : [];
+
         const gameState = roomData.gameState || {};
         if (gameState.players && gameState.players[userId]) {
             delete gameState.players[userId];
         }
 
-        // 参加者を削除
         await updateDoc(roomRef, {
-            participants: roomData.participants.filter(id => id !== userId),
+            participants: participants.filter(id => id !== userId),
             gameState
         });
 
@@ -218,30 +211,30 @@ export const getRoom = async (roomId: string): Promise<Room> => {
 export const getAvailableRooms = async (): Promise<Room[]> => {
     try {
         const roomsRef = collection(db, ROOMS_COLLECTION);
-        // すべての部屋を取得
+
         const querySnapshot = await getDocs(roomsRef);
 
         const rooms: Room[] = [];
         querySnapshot.forEach((doc) => {
             const data = doc.data();
-            // idフィールドがないドキュメントを修正
+            const participants = Array.isArray(data.participants) ? data.participants : [];
+
             const roomData: Room = {
-                id: doc.id, // ドキュメントIDを使用
+                id: doc.id,
                 name: data.name || 'No Name',
                 createdAt: data.createdAt,
-                participants: Array.isArray(data.participants) ? data.participants : [],
+                participants: participants,
                 maxParticipants: data.maxParticipants || 2,
                 gameType: data.gameType,
                 gameState: data.gameState
             };
 
-            // 参加者が最大人数未満の部屋のみを表示
-            if (roomData.participants.length < roomData.maxParticipants) {
+            if (participants.length < roomData.maxParticipants) {
                 rooms.push(roomData);
             }
         });
 
-        console.log('Available rooms:', rooms); // デバッグ用
+        console.log('Available rooms:', rooms);
 
         return rooms;
     } catch (error) {
@@ -286,6 +279,8 @@ export const updatePlayerReady = async (roomId: string, userId: string, isReady:
         const roomData = roomSnap.data() as Room;
         const gameState = roomData.gameState || {};
 
+        const participants = Array.isArray(roomData.participants) ? roomData.participants : [];
+
         if (!gameState.players) {
             gameState.players = {};
         }
@@ -300,21 +295,17 @@ export const updatePlayerReady = async (roomId: string, userId: string, isReady:
             gameState.players[userId].ready = isReady;
         }
 
-        // 全員が準備完了かチェック
         let allReady = true;
-        for (const participantId of roomData.participants) {
+        for (const participantId of participants) {
             if (!gameState.players[participantId] || !gameState.players[participantId].ready) {
                 allReady = false;
                 break;
             }
         }
 
-        // 全員が準備完了ならゲーム開始
-        if (allReady && roomData.participants.length > 1) {
-            // タイピングテキストが設定されているか確認
+        if (allReady && participants.length > 1) {
             if (!gameState.typingText) {
                 console.error('Typing text is not set');
-                // デフォルトのテキストを設定
                 gameState.typingText = "こんにちは、タイピングゲームへようこそ。";
             }
 
@@ -322,8 +313,7 @@ export const updatePlayerReady = async (roomId: string, userId: string, isReady:
             gameState.status = 'playing';
             gameState.startTime = serverTimestamp();
 
-            // 各プレイヤーの進捗をリセット
-            for (const participantId of roomData.participants) {
+            for (const participantId of participants) {
                 if (gameState.players[participantId]) {
                     gameState.players[participantId].progress = 0;
                     gameState.players[participantId].score = 0;
@@ -333,7 +323,6 @@ export const updatePlayerReady = async (roomId: string, userId: string, isReady:
             gameState.status = 'waiting';
         }
 
-        // ゲーム状態を更新
         await updateDoc(roomRef, { gameState });
         console.log('Game state updated:', gameState);
         return true;
@@ -371,7 +360,6 @@ export const updatePlayerProgress = async (roomId: string, userId: string, progr
             gameState.players[userId].progress = progress;
         }
 
-        // 誰かが100%に到達したらゲーム終了
         if (progress >= 100) {
             gameState.status = 'finished';
             gameState.winner = userId;
@@ -389,12 +377,10 @@ export const updatePlayerProgress = async (roomId: string, userId: string, progr
 // WebRTC接続情報の保存
 export const saveRTCData = async (roomId: string, userId: string, connectionData: RTCConnectionData): Promise<boolean> => {
     try {
-        // RTCSessionDescription オブジェクトを処理
         const processedData = {
             ...connectionData
         };
 
-        // offer が RTCSessionDescription オブジェクトの場合、シリアライズ可能な形式に変換
         if (processedData.offer && typeof processedData.offer === 'object') {
             processedData.offer = {
                 type: processedData.offer.type,
@@ -402,7 +388,6 @@ export const saveRTCData = async (roomId: string, userId: string, connectionData
             };
         }
 
-        // answer が RTCSessionDescription オブジェクトの場合、シリアライズ可能な形式に変換
         if (processedData.answer && typeof processedData.answer === 'object') {
             processedData.answer = {
                 type: processedData.answer.type,
@@ -410,11 +395,9 @@ export const saveRTCData = async (roomId: string, userId: string, connectionData
             };
         }
 
-        // candidates を処理（必要な場合）
         if (processedData.candidates) {
             processedData.candidates = processedData.candidates.map(candidate => {
                 if (candidate && typeof candidate === 'object') {
-                    // RTCIceCandidate オブジェクトをシリアライズ可能な形式に変換
                     return {
                         candidate: candidate.candidate,
                         sdpMid: candidate.sdpMid,
@@ -464,7 +447,6 @@ export const subscribeToMessages = (roomId: string, callback: (messages: Message
             messages.push(doc.data() as Message);
         });
 
-        // タイムスタンプでソート
         messages.sort((a, b) => {
             if (!a.timestamp || !b.timestamp) return 0;
             return a.timestamp.seconds - b.timestamp.seconds;
@@ -481,7 +463,6 @@ export const subscribeToRoom = (roomId: string, callback: (room: Room | null) =>
     return onSnapshot(roomRef, (snapshot) => {
         if (snapshot.exists()) {
             const data = snapshot.data();
-            // データの整合性を確保
             const roomData: Room = {
                 id: snapshot.id,
                 name: data.name || 'No Name',
