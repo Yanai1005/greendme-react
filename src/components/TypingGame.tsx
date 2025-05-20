@@ -1,21 +1,20 @@
 import React, { useState, useEffect, useRef } from 'react';
-import {
-    updatePlayerReady,
-    updatePlayerProgress,
-    subscribeToRoom,
-    saveRTCData,
-    subscribeToRTCData
-} from '../services/roomService';
+import { subscribeToRoom, saveRTCData, subscribeToRTCData } from '../services/roomService';
 import type { RTCConnectionData, Room } from '../services/roomService';
 import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../services/firebase/config';
 
-const TYPING_TEXTS = [
-    "こんにちは、タイピングゲームへようこそ。早く正確に入力して勝利しましょう。",
-    "プログラミングは論理的思考を鍛えるのに最適な方法です。",
-    "WebRTCを使うと、ブラウザ間で直接通信ができます。",
-    "Firebaseは、モバイルアプリやウェブアプリの開発を支援するプラットフォームです。",
-    "TypeScriptは、JavaScriptに型システムを追加したプログラミング言語です。"
+const QUESTION_SETS = [
+    // セット1: 基本的な操作
+    [
+        'git init',
+        'git add .',
+        'git commit -m "first commit"',
+        'git status',
+        'git branch',
+        'git push origin main',
+        'git push -f origin main'
+    ]
 ];
 
 interface TypingGameProps {
@@ -28,6 +27,9 @@ interface Player {
     ready: boolean;
     score: number;
     progress: number;
+    totalProgress?: number;
+    currentSetIndex?: number;
+    currentQuestionIndex?: number;
 }
 
 const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => {
@@ -36,11 +38,14 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
     const [typingText, setTypingText] = useState('');
     const [inputText, setInputText] = useState('');
     const [progress, setProgress] = useState(0);
+    const [totalProgress, setTotalProgress] = useState(0);
     const [score, setScore] = useState(0);
     const [startTime, setStartTime] = useState<number | null>(null);
     const [gameStatus, setGameStatus] = useState<'waiting' | 'ready' | 'playing' | 'finished'>('waiting');
     const [otherPlayerId, setOtherPlayerId] = useState<string | null>(null);
     const [connectionError, setConnectionError] = useState<string | null>(null);
+    const [isNotFoundEnding, setIsNotFoundEnding] = useState(false);
+    const [endReason, setEndReason] = useState<string | null>(null);
 
     // WebRTC関連の状態
     const peerConnection = useRef<RTCPeerConnection | null>(null);
@@ -49,15 +54,42 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
     const [isHost, setIsHost] = useState(false);
     const rtcInitialized = useRef<boolean>(false);
 
-    // デバッグ用ログ
-    useEffect(() => {
-        console.log("Room ID:", roomId);
-        console.log("User ID:", userId);
-    }, [roomId, userId]);
+    // 現在の問題セットと問題インデックスを管理する状態を追加
+    const [currentSetIndex, setCurrentSetIndex] = useState(0);
+    const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
+
+    // 問題の総数を計算する関数
+    const getTotalQuestionCount = () => {
+        return QUESTION_SETS.reduce((total, set) => total + set.length, 0);
+    };
+
+    // 現在の問題が全体の何番目かを計算する関数
+    const getCurrentQuestionNumber = () => {
+        let questionNumber = 0;
+        for (let i = 0; i < currentSetIndex; i++) {
+            questionNumber += QUESTION_SETS[i].length;
+        }
+        return questionNumber + currentQuestionIndex + 1; // +1 は0始まりの配列インデックスを1始まりに変換
+    };
+
+    // 全体の進捗率を計算する関数
+    const calculateTotalProgress = () => {
+        const currentNumber = getCurrentQuestionNumber();
+        const totalNumber = getTotalQuestionCount();
+        return Math.floor((currentNumber / totalNumber) * 100);
+    };
 
     // 部屋の情報を監視
     useEffect(() => {
         console.log("Subscribing to room:", roomId);
+
+        // 初期状態を設定（最初のロード時のみ）
+        if (!typingText && QUESTION_SETS[0][0]) {
+            console.log("Setting initial empty question for display");
+            setTypingText(QUESTION_SETS[0][0]);
+            setCurrentSetIndex(0);
+            setCurrentQuestionIndex(0);
+        }
 
         const unsubscribe = subscribeToRoom(roomId, (roomData) => {
             if (roomData) {
@@ -79,27 +111,45 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
                     setOtherPlayerId(null);
                 }
 
-                // ゲームの状態を更新
+                // ゲームの状態を更新 - 自分の状態とルーム内の参加者の準備状態のみ
                 if (roomData.gameState) {
                     console.log("Game state:", roomData.gameState);
-                    setGameStatus(roomData.gameState.status || 'waiting');
 
-                    // 自分の準備状態を更新
-                    if (roomData.gameState.players && roomData.gameState.players[userId]) {
-                        setIsReady(roomData.gameState.players[userId].ready || false);
+                    // 自分のプレイヤーデータのみを参照
+                    const playerData = roomData.gameState.players?.[userId];
+                    if (playerData) {
+                        setIsReady(playerData.ready || false);
                     }
 
-                    // タイピングテキストを設定
-                    if (roomData.gameState.typingText) {
-                        setTypingText(roomData.gameState.typingText);
+                    // 全員が準備完了したかチェック
+                    let allReady = true;
+                    let playerCount = 0;
+
+                    // 参加者全員が準備OKか確認
+                    if (roomData.participants && roomData.gameState.players) {
+                        roomData.participants.forEach(participantId => {
+                            const participant = roomData.gameState.players[participantId];
+                            if (participant) {
+                                playerCount++;
+                                if (!participant.ready) {
+                                    allReady = false;
+                                }
+                            }
+                        });
                     }
 
-                    // ゲーム開始時の処理
-                    if (roomData.gameState.status === 'playing') {
+                    // 2人以上のプレイヤーがいて全員が準備完了したらゲーム開始
+                    if (allReady && playerCount >= 2 && gameStatus === 'waiting') {
+                        console.log("All players ready, starting game");
+                        // ゲーム開始（問題テキストはローカルに既に設定済み）
+                        setGameStatus('playing');
                         if (!startTime) {
                             setStartTime(Date.now());
                         }
                     }
+
+                    // 注意：問題テキストの更新は行わない
+                    // - プレイヤーの状態のみを更新（問題テキストはローカルで管理）
                 }
             } else {
                 console.log("No room data received");
@@ -110,7 +160,35 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
             console.log("Unsubscribing from room");
             unsubscribe();
         };
-    }, [roomId, userId]);
+    }, [roomId, userId, gameStatus, startTime, typingText]);
+
+    // プレイヤーの進捗状態を更新
+    const updatePlayerState = async (progress: number, score: number, setIndex: number, questionIndex: number) => {
+        try {
+            const currentTotalProgress = calculateTotalProgress();
+            setTotalProgress(currentTotalProgress);
+
+            // Firestoreに進捗を保存
+            const roomRef = doc(db, 'rooms', roomId);
+            await updateDoc(roomRef, {
+                [`gameState.players.${userId}.progress`]: progress,
+                [`gameState.players.${userId}.score`]: score,
+                [`gameState.players.${userId}.totalProgress`]: currentTotalProgress,
+                [`gameState.players.${userId}.currentSetIndex`]: setIndex,
+                [`gameState.players.${userId}.currentQuestionIndex`]: questionIndex
+            });
+
+            console.log("Player state updated in Firestore:", {
+                progress, score, totalProgress: currentTotalProgress,
+                setIndex, questionIndex
+            });
+
+            return true;
+        } catch (error) {
+            console.error("Error updating player state:", error);
+            throw error;
+        }
+    };
 
     // WebRTC接続の初期化
     useEffect(() => {
@@ -496,10 +574,16 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
                 if (otherPlayerId && room?.gameState?.players) {
                     const updatedGameState = { ...room.gameState };
                     if (!updatedGameState.players[otherPlayerId]) {
-                        updatedGameState.players[otherPlayerId] = { ready: true, progress: 0, score: 0 };
+                        updatedGameState.players[otherPlayerId] = {
+                            ready: true,
+                            progress: 0,
+                            score: 0,
+                            totalProgress: 0
+                        };
                     }
                     updatedGameState.players[otherPlayerId].progress = data.progress;
-                    updatedGameState.players[otherPlayerId].score = data.score;
+                    updatedGameState.players[otherPlayerId].score = data.score || 0;
+                    updatedGameState.players[otherPlayerId].totalProgress = data.totalProgress || 0;
 
                     console.log("Updated game state with peer progress:", updatedGameState);
                 }
@@ -507,9 +591,147 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
                 console.log("Received connection confirmation from peer:", data.userId);
                 setIsConnected(true);
                 setConnectionError(null);
+            } else if (data.type === 'notFound') {
+                // 相手が「git push -f origin main」を完了した場合
+                console.log("Peer encountered Not Found");
+                // 修正: 相手がNot Foundを送信した場合も終了する
+                setIsNotFoundEnding(true);
+                setGameStatus('finished');
             }
+            // nextQuestionタイプは処理しない（問題同期をしない）
         } catch (error) {
             console.error('Error parsing peer message:', error);
+        }
+    };
+
+    // 入力テキストが変更されたとき
+    const handleInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (gameStatus !== 'playing') return;
+
+        const inputValue = e.target.value;
+        setInputText(inputValue);
+
+        // 進捗を計算（文字ごとの一致率）
+        let matchCount = 0;
+        const minLength = Math.min(inputValue.length, typingText.length);
+
+        for (let i = 0; i < minLength; i++) {
+            if (inputValue[i] === typingText[i]) {
+                matchCount++;
+            }
+        }
+
+        // 長さの違いによるペナルティを計算
+        const lengthPenalty = Math.abs(inputValue.length - typingText.length) * 5;
+
+        // 達成度を計算（最大100%）
+        const newProgress = Math.max(0, Math.min(100, Math.round((matchCount / typingText.length) * 100 - lengthPenalty)));
+        setProgress(newProgress);
+
+        // 経過時間からスコアを計算
+        if (startTime) {
+            const elapsedTime = (Date.now() - startTime) / 1000; // 秒単位
+            const newScore = Math.floor((matchCount / elapsedTime) * 60); // 1分あたりの文字数
+            setScore(newScore);
+        }
+
+        // 全体の進捗率を更新
+        const currentTotalProgress = calculateTotalProgress();
+        setTotalProgress(currentTotalProgress);
+
+        // Firestoreに進捗を保存（リアルタイム更新）
+        try {
+            await updatePlayerState(newProgress, score, currentSetIndex, currentQuestionIndex);
+        } catch (err) {
+            console.error("Error updating progress in Firebase:", err);
+        }
+
+        // WebRTC通信はタイピング中には行わない（問題完了時のみ通知）
+
+        // タイピングが完了したかチェック
+        if (inputValue === typingText) {
+            console.log("Question completed:", typingText);
+
+            // git push -f origin mainの場合はNot Found
+            if (typingText === 'git push -f origin main') {
+                console.log("Showing Not Found for force push");
+                setIsNotFoundEnding(true);
+                setGameStatus('finished');
+                try {
+                    await updatePlayerState(100, score, currentSetIndex, currentQuestionIndex);
+                } catch (err) {
+                    console.error("Error updating final progress:", err);
+                }
+
+                // ゲーム終了を相手に通知
+                if (dataChannel.current?.readyState === 'open') {
+                    dataChannel.current.send(JSON.stringify({
+                        type: 'notFound',
+                        timestamp: Date.now()
+                    }));
+                }
+            } else {
+                // 通常の完了処理 - 強制的に次の問題を設定
+                console.log("Question completed, moving to next question");
+
+                // 次の問題のインデックスを計算
+                let nextSetIndex = currentSetIndex;
+                let nextQuestionIndex = currentQuestionIndex + 1;
+                let nextQuestion = '';
+
+                // セット内に次の問題がある場合
+                if (nextQuestionIndex < QUESTION_SETS[currentSetIndex].length) {
+                    nextQuestion = QUESTION_SETS[currentSetIndex][nextQuestionIndex];
+                } else {
+                    // 次のセットに移動
+                    nextSetIndex = (currentSetIndex + 1) % QUESTION_SETS.length;
+                    nextQuestionIndex = 0;
+                    nextQuestion = QUESTION_SETS[nextSetIndex][0];
+                }
+
+                console.log("Next question will be:", nextQuestion);
+
+                // Firestore更新
+                try {
+                    // ゲーム状態をすべて一度に更新
+                    const roomRef = doc(db, 'rooms', roomId);
+                    await updateDoc(roomRef, {
+                        'gameState.typingText': nextQuestion,
+                        'gameState.status': 'playing',
+                        [`gameState.players.${userId}.progress`]: 0,
+                        [`gameState.players.${userId}.currentSetIndex`]: nextSetIndex,
+                        [`gameState.players.${userId}.currentQuestionIndex`]: nextQuestionIndex
+                    });
+
+                    // ローカル状態の更新
+                    setCurrentSetIndex(nextSetIndex);
+                    setCurrentQuestionIndex(nextQuestionIndex);
+                    setTypingText(nextQuestion);
+                    setInputText('');
+                    setProgress(0);
+
+                    // 全体の進捗率を更新
+                    const newTotalProgress = calculateTotalProgress();
+                    setTotalProgress(newTotalProgress);
+
+                    console.log("Successfully moved to next question");
+
+                    // 問題完了時に進捗情報をWebRTC経由で相手に送信
+                    if (dataChannel.current?.readyState === 'open') {
+                        dataChannel.current.send(JSON.stringify({
+                            type: 'progress',
+                            progress: 0, // 新しい問題の進捗
+                            score: score,
+                            totalProgress: newTotalProgress,
+                            completed: true, // 問題が完了したフラグ
+                            timestamp: Date.now()
+                        }));
+                        console.log("Progress update sent on question completion");
+                    }
+                } catch (err) {
+                    console.error("Failed to update to next question:", err);
+                }
+            }
         }
     };
 
@@ -519,145 +741,36 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
         setIsReady(newReadyState);
 
         try {
-            // ホストの場合、タイピングテキストを設定
-            if (isHost && newReadyState) {
-                const randomText = TYPING_TEXTS[Math.floor(Math.random() * TYPING_TEXTS.length)];
-                console.log("Setting typing text:", randomText);
-
-                // タイピングテキストを更新
-                await updateTypingText(randomText);
-
-                // ローカルの状態も更新
-                setTypingText(randomText);
-            }
-
-            // 準備状態を更新
-            await updatePlayerReady(roomId, userId, newReadyState);
-            console.log("Ready state updated:", newReadyState);
-        } catch (error) {
-            console.error("Error updating ready state:", error);
-            // エラーが発生した場合は状態を元に戻す
-            setIsReady(!newReadyState);
-        }
-    };
-
-    // タイピングテキストを更新
-    const updateTypingText = async (text: string) => {
-        if (!room) return;
-
-        try {
+            // 準備状態をFirestoreで更新
             const roomRef = doc(db, 'rooms', roomId);
             await updateDoc(roomRef, {
-                'gameState.typingText': text
-            });
-            console.log("Typing text updated in Firestore:", text);
-        } catch (error) {
-            console.error("Error updating typing text:", error);
-            throw error;
-        }
-    };
-
-    // 入力テキストが変更されたとき
-    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (gameStatus !== 'playing') return;
-
-        const inputValue = e.target.value;
-        setInputText(inputValue);
-
-        // 進捗を計算
-        const newProgress = Math.floor((inputValue.length / typingText.length) * 100);
-        setProgress(newProgress);
-
-        // 経過時間からスコアを計算
-        if (startTime) {
-            const elapsedTime = (Date.now() - startTime) / 1000; // 秒単位
-            const newScore = Math.floor((inputValue.length / elapsedTime) * 60); // 1分あたりの文字数
-            setScore(newScore);
-        }
-
-        // 進捗をFirebaseとピアに送信
-        try {
-            // Firebaseに進捗を保存
-            updatePlayerProgress(roomId, userId, newProgress, score).catch(err => {
-                console.error("Error updating progress in Firebase:", err);
+                [`gameState.players.${userId}.ready`]: newReadyState,
+                [`gameState.players.${userId}.progress`]: 0
             });
 
-            // WebRTC経由で相手に進捗を送信
-            if (dataChannel.current && dataChannel.current.readyState === 'open') {
-                try {
-                    dataChannel.current.send(JSON.stringify({
-                        type: 'progress',
-                        progress: newProgress,
-                        score,
-                        timestamp: Date.now()
-                    }));
-                    console.log("Progress sent via WebRTC:", newProgress);
-                } catch (rtcErr) {
-                    console.error("Error sending progress via WebRTC:", rtcErr);
-                }
-            } else {
-                console.log("Data channel not ready, progress not sent. State:", dataChannel.current?.readyState || 'null');
-            }
+            console.log("Player ready state updated in Firestore:", newReadyState);
+            setIsNotFoundEnding(false);
+            setEndReason(null);
+            if (newReadyState) {
+                const initialSet = 0;
+                const initialQuestion = 0;
+                const initialText = QUESTION_SETS[initialSet][initialQuestion];
 
-            // タイピングが完了したらゲーム終了
-            if (inputValue === typingText) {
-                updatePlayerProgress(roomId, userId, 100, score).catch(err => {
-                    console.error("Error updating final progress:", err);
-                });
-                console.log("Typing completed, game finished");
+                console.log("Setting up initial question in local state:", initialText);
+
+                setCurrentSetIndex(initialSet);
+                setCurrentQuestionIndex(initialQuestion);
+                setInputText('');
+                setProgress(0);
+                setScore(0);
+                setTotalProgress(0);
+                setTypingText(initialText);
             }
         } catch (error) {
-            console.error("Error in handleInputChange:", error);
+            console.error("Error updating ready state:", error);
+
+            setIsReady(!newReadyState);
         }
-    };
-
-    // 他のプレイヤーの進捗を表示
-    const renderOtherPlayerProgress = () => {
-        if (!room || !room.gameState || !room.gameState.players || !otherPlayerId) {
-            console.log("Cannot render other player progress, missing data");
-            return null;
-        }
-
-        const player = room.gameState.players[otherPlayerId] as Player | undefined;
-        if (!player) {
-            console.log("Other player data not found");
-            return null;
-        }
-
-        return (
-            <div key={otherPlayerId} className="opponent-progress">
-                <div className="player-name">対戦相手</div>
-                <div className="progress-bar">
-                    <div
-                        className="progress-fill"
-                        style={{ width: `${player.progress}%` }}
-                    ></div>
-                </div>
-                <div className="progress-text">{player.progress}%</div>
-                <div className="score">スコア: {player.score}</div>
-            </div>
-        );
-    };
-
-    // ゲーム結果の表示
-    const renderGameResult = () => {
-        if (gameStatus !== 'finished' || !room || !room.gameState) return null;
-
-        const winner = room.gameState.winner;
-        const isWinner = winner === userId;
-
-        return (
-            <div className="game-result">
-                <h3>{isWinner ? '勝利！' : '敗北...'}</h3>
-                <p>あなたのスコア: {score}</p>
-                {room.gameState.players && otherPlayerId && room.gameState.players[otherPlayerId] && (
-                    <p>相手のスコア: {(room.gameState.players[otherPlayerId] as Player).score}</p>
-                )}
-                <button onClick={toggleReady} className="ready-button">
-                    もう一度プレイ
-                </button>
-            </div>
-        );
     };
 
     // WebRTC接続をリセット
@@ -689,13 +802,62 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
         }, 2000);
     };
 
+    // 他のプレイヤーの進捗を表示
+    const renderOtherPlayerProgress = () => {
+        if (!room || !room.gameState || !room.gameState.players || !otherPlayerId) {
+            console.log("Cannot render other player progress, missing data");
+            return null;
+        }
+
+        const player = room.gameState.players[otherPlayerId] as Player | undefined;
+        if (!player) {
+            console.log("Other player data not found");
+            return null;
+        }
+
+        return (
+            <div key={otherPlayerId} className="opponent-progress">
+                <div className="player-name">対戦相手</div>
+                <div className="progress-bar">
+                    <div
+                        className="progress-fill"
+                        style={{ width: `${player.progress}%` }}
+                    ></div>
+                </div>
+                <div className="progress-bar" style={{ marginTop: '5px' }}>
+                    <div
+                        className="progress-fill bg-red-500"
+                        style={{ width: `${player.totalProgress || 0}%` }}
+                    ></div>
+                </div>
+                <div className="progress-text">{player.totalProgress || 0}% (全体)</div>
+            </div>
+        );
+    };
+
+    // ゲーム結果の表示
+    const renderGameResult = () => {
+        if (gameStatus !== 'finished') return null;
+
+        // Not Found エンディングの場合（typingTextでの判断を修正）
+        if (isNotFoundEnding || typingText === 'git push -f origin main') {
+            return (
+                <div className="game-result">
+                    <h3>Not Found</h3>
+                    <p>このコマンドは実行できません</p>
+                    {endReason && <p className="text-sm text-gray-600 mt-2">{endReason}</p>}
+                </div>
+            );
+        }
+    };
+
     if (!room) {
         return <div>ルーム情報を読み込み中...</div>;
     }
 
     return (
         <div className="typing-game">
-            <h2>タイピングゲーム</h2>
+            <h2>Gitコマンドタイピングゲーム</h2>
 
             <div className="game-status">
                 ステータス: {
@@ -717,7 +879,8 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
                 <div>参加者数: {room.participants.length}</div>
                 <div>接続状態: {isConnected ? '接続済み' : '未接続'}</div>
                 <div>準備状態: {isReady ? '準備完了' : '未準備'}</div>
-                <div>タイピングテキスト: {typingText ? '設定済み' : '未設定'}</div>
+                <div>問題セット: {currentSetIndex + 1}/{QUESTION_SETS.length} - 問題: {currentQuestionIndex + 1}/{QUESTION_SETS[currentSetIndex].length}</div>
+                <div>全体進捗率: {totalProgress}%</div>
             </div>
 
             {connectionError && (
@@ -767,6 +930,9 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
                             disabled={!typingText}
                             placeholder={typingText ? "ここに入力してください" : "ゲームの準備中です..."}
                         />
+                        <div className="text-sm text-gray-500 mt-2">
+                            問題 {currentQuestionIndex + 1}/{QUESTION_SETS[0].length}
+                        </div>
                     </div>
 
                     <div className="progress-area">
@@ -778,8 +944,12 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
                                     style={{ width: `${progress}%` }}
                                 ></div>
                             </div>
-                            <div className="progress-text">{progress}%</div>
-                            <div className="score">スコア: {score}</div>
+                            <div className="progress-bar" style={{ marginTop: '5px' }}>
+                                <div
+                                    className="progress-fill bg-green-500"
+                                    style={{ width: `${totalProgress}%` }}
+                                ></div>
+                            </div>
                         </div>
 
                         {renderOtherPlayerProgress()}
@@ -788,29 +958,8 @@ const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => 
             )}
 
             {renderGameResult()}
-
-            {/* デバッグ情報 */}
-            <div className="debug-info" style={{ marginTop: '20px', fontSize: '12px', color: '#666' }}>
-                <details>
-                    <summary>デバッグ情報</summary>
-                    <pre>
-                        {JSON.stringify({
-                            roomId,
-                            userId,
-                            isHost,
-                            isReady,
-                            gameStatus,
-                            typingText: typingText ? `${typingText.substring(0, 20)}...` : 'なし',
-                            participants: room?.participants,
-                            gameState: room?.gameState,
-                            rtcInitialized: rtcInitialized.current,
-                            dataChannelState: dataChannel.current?.readyState || 'なし'
-                        }, null, 2)}
-                    </pre>
-                </details>
-            </div>
         </div>
     );
 };
 
-export default TypingGame; 
+export default TypingGame;
