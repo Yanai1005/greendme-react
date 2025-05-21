@@ -1,4 +1,3 @@
-import React from 'react';
 import type { Room } from '../../services/room/types';
 import { QUESTION_SETS } from '../../constants/questionSets';
 import TypingProgress from './TypingProgress';
