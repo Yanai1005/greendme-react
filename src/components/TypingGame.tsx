@@ -5,7 +5,6 @@ import { doc, updateDoc } from 'firebase/firestore';
 import { db } from '../services/firebase/config';
 
 const QUESTION_SETS = [
-    // セット1: 基本的な操作
     [
         'git init',
         'git add .',
@@ -32,7 +31,9 @@ interface Player {
     currentQuestionIndex?: number;
 }
 
-const TypingGame: React.FC<TypingGameProps> = ({ roomId, userId, userName }) => {
+const TypingGame = (props: TypingGameProps) => {
+    const { roomId, userId, userName } = props;
+
     const [room, setRoom] = useState<Room | null>(null);
     const [isReady, setIsReady] = useState(false);
     const [typingText, setTypingText] = useState('');

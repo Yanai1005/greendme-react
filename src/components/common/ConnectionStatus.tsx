@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 
 interface ConnectionStatusProps {
     status: 'connecting' | 'connected' | 'failed' | 'closed';
@@ -7,12 +7,9 @@ interface ConnectionStatusProps {
     onRegenerateSignal?: () => Promise<string>;
 }
 
-const ConnectionStatus: React.FC<ConnectionStatusProps> = ({
-    status,
-    onRetry,
-    onExit,
-    onRegenerateSignal
-}) => {
+const ConnectionStatus = (props: ConnectionStatusProps) => {
+    const { status, onRetry, onExit, onRegenerateSignal } = props;
+
     const [isRegenerating, setIsRegenerating] = useState(false);
     const [regeneratedSignal, setRegeneratedSignal] = useState<string | null>(null);
     const [copySuccess, setCopySuccess] = useState(false);
