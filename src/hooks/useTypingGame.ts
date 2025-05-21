@@ -223,7 +223,6 @@ export const useTypingGame = ({
                         [`gameState.players.${userId}.currentQuestionIndex`]: nextQuestionIndex
                     });
 
-                    // ローカル状態の更新
                     setCurrentSetIndex(nextSetIndex);
                     setCurrentQuestionIndex(nextQuestionIndex);
                     setTypingText(nextQuestion);
@@ -240,10 +239,10 @@ export const useTypingGame = ({
                     if (dataChannel.current?.readyState === 'open') {
                         dataChannel.current.send(JSON.stringify({
                             type: 'progress',
-                            progress: 0, // 新しい問題の進捗
+                            progress: 0,
                             score: score,
                             totalProgress: newTotalProgress,
-                            completed: true, // 問題が完了したフラグ
+                            completed: true,
                             timestamp: Date.now()
                         }));
                     }

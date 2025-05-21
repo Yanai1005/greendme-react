@@ -7,7 +7,6 @@ import GameScreen from './GameScreen';
 import GameResult from './GameResult';
 import ConnectionStatus from '../common/ConnectionStatus';
 
-// propsの型定義
 type TypingGameProps = {
     roomId: string;
     userId: string;
@@ -68,8 +67,8 @@ const TypingGame = (props: TypingGameProps) => {
         userId,
         isReady,
         dataChannel,
-        otherPlayerId,  // 相手プレイヤーIDを渡す
-        room            // roomオブジェクトを渡す
+        otherPlayerId,
+        room
     });
 
     // ローディング状態

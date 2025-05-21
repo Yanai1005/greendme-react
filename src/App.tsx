@@ -25,7 +25,6 @@ const App = () => {
       setIsLoading(true);
       setError(null);
 
-      // ランダムマッチング実行
       const newRoomId = await randomMatch(userId, userName);
       setRoomId(newRoomId);
     } catch (err) {
@@ -47,7 +46,6 @@ const App = () => {
 
       {!roomId ? (
         <div className="setup-screen">
-          {/* ユーザー名設定 */}
           <div className="user-settings mb-4">
             <label htmlFor="userName" className="mr-2">ユーザー名:</label>
             <input
@@ -60,14 +58,12 @@ const App = () => {
             />
           </div>
 
-          {/* エラー表示 */}
           {error && (
             <div className="error-message mb-4 p-2 bg-red-100 text-red-700 rounded">
               {error}
             </div>
           )}
 
-          {/* ランダムマッチングボタン */}
           <div className="random-match-button mb-4">
             <button
               onClick={handleRandomMatch}

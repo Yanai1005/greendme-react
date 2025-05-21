@@ -12,7 +12,7 @@ interface UseWebRTCProps {
 interface UseWebRTCReturn {
     isConnected: boolean;
     connectionError: string | null;
-    dataChannel: React.RefObject<RTCDataChannel | null>; // MutableRefObject から RefObject に変更
+    dataChannel: React.RefObject<RTCDataChannel | null>;
     sendMessage: (message: object) => boolean;
     resetConnection: () => void;
 }
@@ -160,7 +160,6 @@ export const useWebRTC = ({
                                 candidates: []
                             };
 
-                            // 現在のローカル記述を取得
                             const localDesc = pc.localDescription;
                             if (localDesc) {
                                 // シリアライズ可能な形式に変換
@@ -202,7 +201,7 @@ export const useWebRTC = ({
                         console.log("Connection timeout, current state:", peerConnection.current.connectionState);
                         setConnectionError("WebRTC接続がタイムアウトしました。再接続してください。");
                     }
-                }, 30000); // 30秒タイムアウト
+                }, 30000);
 
                 const handleChannelOpen = () => {
                     console.log('Data channel opened');
@@ -235,7 +234,7 @@ export const useWebRTC = ({
                     try {
                         const channel = pc.createDataChannel('game', {
                             ordered: true,
-                            maxRetransmits: 3 // 再送回数を制限
+                            maxRetransmits: 3
                         });
                         dataChannel.current = channel;
 
@@ -292,7 +291,6 @@ export const useWebRTC = ({
             }
         };
 
-        // 少し待ってから接続を初期化
         const initTimeoutId = setTimeout(() => {
             initWebRTC();
         }, 1000);

@@ -1,6 +1,5 @@
 import type { Room } from '../../services/room/types';
 
-// propsの型定義
 type WaitingScreenProps = {
     isReady: boolean;
     otherPlayerId: string | null;
