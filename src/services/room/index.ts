@@ -1,4 +1,4 @@
-import { db } from './firebase/config';
+import { db } from '../firebase/config';
 import {
     collection,
     doc,
@@ -9,43 +9,14 @@ import {
     serverTimestamp,
     getDocs
 } from 'firebase/firestore';
+import type {
+    Room,
+    Message,
+    RTCConnectionData,
+    GameState,
+} from './types';
 
-export type Room = {
-    id: string;
-    name: string;
-    createdAt: any;
-    participants: string[];
-    maxParticipants: number;
-    gameType?: string;
-    gameState?: any;
-}
-
-export type Message = {
-    id: string;
-    roomId: string;
-    senderId: string;
-    content: string;
-    timestamp: any;
-}
-
-// WebRTC接続情報の型定義
-export type RTCConnectionData = {
-    offer?: {
-        type: string;
-        sdp: string;
-    };
-    answer?: {
-        type: string;
-        sdp: string;
-    };
-    candidates: Array<{
-        candidate: string;
-        sdpMid: string | null;
-        sdpMLineIndex: number | null;
-        usernameFragment?: string | null;
-    }>;
-}
-
+// コレクション名の定数
 const ROOMS_COLLECTION = 'rooms';
 const MESSAGES_COLLECTION = 'messages';
 const RTC_COLLECTION = 'rtc';
@@ -112,10 +83,16 @@ export const joinRoom = async (roomId: string, userId: string): Promise<boolean>
             throw new Error('Room is full');
         }
 
-        const gameState = roomData.gameState || {
+        // 明示的に GameState 型を指定し、players が必ず存在するようにする
+        const gameState: GameState = roomData.gameState || {
             status: 'waiting',
-            players: {}
+            players: {} // 空のオブジェクトでも型的に問題ないように
         };
+
+        // players が undefined でないことを保証
+        if (!gameState.players) {
+            gameState.players = {};
+        }
 
         gameState.players[userId] = {
             ready: false,
@@ -160,6 +137,7 @@ export const randomMatch = async (userId: string, userName: string): Promise<str
     }
 };
 
+// 部屋を退出する
 export const leaveRoom = async (roomId: string, userId: string): Promise<boolean> => {
     try {
         const roomRef = doc(db, ROOMS_COLLECTION, roomId);
@@ -170,10 +148,15 @@ export const leaveRoom = async (roomId: string, userId: string): Promise<boolean
         }
 
         const roomData = roomSnap.data() as Room;
-
         const participants = Array.isArray(roomData.participants) ? roomData.participants : [];
 
-        const gameState = roomData.gameState || {};
+        // 型を明示的に指定
+        const gameState: GameState = roomData.gameState || {
+            status: 'waiting',
+            players: {}
+        };
+
+        // players が存在することを確認
         if (gameState.players && gameState.players[userId]) {
             delete gameState.players[userId];
         }
@@ -211,13 +194,18 @@ export const getRoom = async (roomId: string): Promise<Room> => {
 export const getAvailableRooms = async (): Promise<Room[]> => {
     try {
         const roomsRef = collection(db, ROOMS_COLLECTION);
-
         const querySnapshot = await getDocs(roomsRef);
-
         const rooms: Room[] = [];
+
         querySnapshot.forEach((doc) => {
             const data = doc.data();
             const participants = Array.isArray(data.participants) ? data.participants : [];
+
+            // gameState が存在することを確認
+            const gameState: GameState = data.gameState || {
+                status: 'waiting',
+                players: {}
+            };
 
             const roomData: Room = {
                 id: doc.id,
@@ -226,7 +214,7 @@ export const getAvailableRooms = async (): Promise<Room[]> => {
                 participants: participants,
                 maxParticipants: data.maxParticipants || 2,
                 gameType: data.gameType,
-                gameState: data.gameState
+                gameState
             };
 
             if (participants.length < roomData.maxParticipants) {
@@ -235,141 +223,9 @@ export const getAvailableRooms = async (): Promise<Room[]> => {
         });
 
         console.log('Available rooms:', rooms);
-
         return rooms;
     } catch (error) {
         console.error('Error getting available rooms:', error);
-        throw error;
-    }
-};
-
-// メッセージを送信する
-export const sendMessage = async (roomId: string, senderId: string, content: string): Promise<string> => {
-    try {
-        const messagesRef = collection(db, ROOMS_COLLECTION, roomId, MESSAGES_COLLECTION);
-        const newMessageRef = doc(messagesRef);
-        const messageId = newMessageRef.id;
-
-        const messageData: Message = {
-            id: messageId,
-            roomId,
-            senderId,
-            content,
-            timestamp: serverTimestamp()
-        };
-
-        await setDoc(newMessageRef, messageData);
-        return messageId;
-    } catch (error) {
-        console.error('Error sending message:', error);
-        throw error;
-    }
-};
-
-// プレイヤーの準備状態を更新
-export const updatePlayerReady = async (roomId: string, userId: string, isReady: boolean): Promise<boolean> => {
-    try {
-        const roomRef = doc(db, ROOMS_COLLECTION, roomId);
-        const roomSnap = await getDoc(roomRef);
-
-        if (!roomSnap.exists()) {
-            throw new Error('Room not found');
-        }
-
-        const roomData = roomSnap.data() as Room;
-        const gameState = roomData.gameState || {};
-
-        const participants = Array.isArray(roomData.participants) ? roomData.participants : [];
-
-        if (!gameState.players) {
-            gameState.players = {};
-        }
-
-        if (!gameState.players[userId]) {
-            gameState.players[userId] = {
-                ready: isReady,
-                score: 0,
-                progress: 0
-            };
-        } else {
-            gameState.players[userId].ready = isReady;
-        }
-
-        let allReady = true;
-        for (const participantId of participants) {
-            if (!gameState.players[participantId] || !gameState.players[participantId].ready) {
-                allReady = false;
-                break;
-            }
-        }
-
-        if (allReady && participants.length > 1) {
-            if (!gameState.typingText) {
-                console.error('Typing text is not set');
-                gameState.typingText = "こんにちは、タイピングゲームへようこそ。";
-            }
-
-            console.log('All players ready, starting game with text:', gameState.typingText);
-            gameState.status = 'playing';
-            gameState.startTime = serverTimestamp();
-
-            for (const participantId of participants) {
-                if (gameState.players[participantId]) {
-                    gameState.players[participantId].progress = 0;
-                    gameState.players[participantId].score = 0;
-                }
-            }
-        } else {
-            gameState.status = 'waiting';
-        }
-
-        await updateDoc(roomRef, { gameState });
-        console.log('Game state updated:', gameState);
-        return true;
-    } catch (error) {
-        console.error('Error updating player ready status:', error);
-        throw error;
-    }
-};
-
-// プレイヤーのゲーム進捗を更新
-export const updatePlayerProgress = async (roomId: string, userId: string, progress: number, score: number): Promise<boolean> => {
-    try {
-        const roomRef = doc(db, ROOMS_COLLECTION, roomId);
-        const roomSnap = await getDoc(roomRef);
-
-        if (!roomSnap.exists()) {
-            throw new Error('Room not found');
-        }
-
-        const roomData = roomSnap.data() as Room;
-        const gameState = roomData.gameState || {};
-
-        if (!gameState.players) {
-            gameState.players = {};
-        }
-
-        if (!gameState.players[userId]) {
-            gameState.players[userId] = {
-                ready: true,
-                score,
-                progress
-            };
-        } else {
-            gameState.players[userId].score = score;
-            gameState.players[userId].progress = progress;
-        }
-
-        if (progress >= 100) {
-            gameState.status = 'finished';
-            gameState.winner = userId;
-            gameState.endTime = serverTimestamp();
-        }
-
-        await updateDoc(roomRef, { gameState });
-        return true;
-    } catch (error) {
-        console.error('Error updating player progress:', error);
         throw error;
     }
 };
@@ -437,25 +293,6 @@ export const getRTCData = async (roomId: string, userId: string): Promise<RTCCon
     }
 };
 
-// 部屋のメッセージをリアルタイムで監視する
-export const subscribeToMessages = (roomId: string, callback: (messages: Message[]) => void) => {
-    const messagesRef = collection(db, ROOMS_COLLECTION, roomId, MESSAGES_COLLECTION);
-
-    return onSnapshot(messagesRef, (snapshot) => {
-        const messages: Message[] = [];
-        snapshot.forEach((doc) => {
-            messages.push(doc.data() as Message);
-        });
-
-        messages.sort((a, b) => {
-            if (!a.timestamp || !b.timestamp) return 0;
-            return a.timestamp.seconds - b.timestamp.seconds;
-        });
-
-        callback(messages);
-    });
-};
-
 // 部屋の情報をリアルタイムで監視する
 export const subscribeToRoom = (roomId: string, callback: (room: Room | null) => void) => {
     const roomRef = doc(db, ROOMS_COLLECTION, roomId);
@@ -463,6 +300,18 @@ export const subscribeToRoom = (roomId: string, callback: (room: Room | null) =>
     return onSnapshot(roomRef, (snapshot) => {
         if (snapshot.exists()) {
             const data = snapshot.data();
+
+            // gameState が必ず存在し、players が含まれるように保証
+            const gameState: GameState = data.gameState || {
+                status: 'waiting',
+                players: {}
+            };
+
+            // players が未定義の場合に備える
+            if (!gameState.players) {
+                gameState.players = {};
+            }
+
             const roomData: Room = {
                 id: snapshot.id,
                 name: data.name || 'No Name',
@@ -470,7 +319,7 @@ export const subscribeToRoom = (roomId: string, callback: (room: Room | null) =>
                 participants: Array.isArray(data.participants) ? data.participants : [],
                 maxParticipants: data.maxParticipants || 2,
                 gameType: data.gameType,
-                gameState: data.gameState
+                gameState
             };
             callback(roomData);
         } else {
@@ -490,4 +339,73 @@ export const subscribeToRTCData = (roomId: string, userId: string, callback: (da
             callback(null);
         }
     });
-}; 
+};
+
+// プレイヤーの準備状態を更新
+export const updatePlayerReady = async (roomId: string, userId: string, isReady: boolean): Promise<boolean> => {
+    try {
+        const roomRef = doc(db, ROOMS_COLLECTION, roomId);
+        await updateDoc(roomRef, {
+            [`gameState.players.${userId}.ready`]: isReady
+        });
+        return true;
+    } catch (error) {
+        console.error('Error updating player ready status:', error);
+        throw error;
+    }
+};
+
+// プレイヤーの進捗を更新
+export const updatePlayerProgress = async (
+    roomId: string,
+    userId: string,
+    progress: number,
+    score: number
+): Promise<boolean> => {
+    try {
+        const roomRef = doc(db, ROOMS_COLLECTION, roomId);
+        await updateDoc(roomRef, {
+            [`gameState.players.${userId}.progress`]: progress,
+            [`gameState.players.${userId}.score`]: score
+        });
+        return true;
+    } catch (error) {
+        console.error('Error updating player progress:', error);
+        throw error;
+    }
+};
+
+// メッセージを送信する
+export const sendMessage = async (roomId: string, senderId: string, content: string): Promise<string> => {
+    try {
+        const messagesRef = collection(db, ROOMS_COLLECTION, roomId, MESSAGES_COLLECTION);
+        const newMessageRef = doc(messagesRef);
+        const messageId = newMessageRef.id;
+
+        const messageData: Message = {
+            id: messageId,
+            roomId,
+            senderId,
+            content,
+            timestamp: serverTimestamp()
+        };
+
+        await setDoc(newMessageRef, messageData);
+        return messageId;
+    } catch (error) {
+        console.error('Error sending message:', error);
+        throw error;
+    }
+};
+
+// ゲームの状態を更新
+export const updateGameState = async (roomId: string, gameState: Partial<GameState>): Promise<boolean> => {
+    try {
+        const roomRef = doc(db, ROOMS_COLLECTION, roomId);
+        await updateDoc(roomRef, { gameState });
+        return true;
+    } catch (error) {
+        console.error('Error updating game state:', error);
+        throw error;
+    }
+};

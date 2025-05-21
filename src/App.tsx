@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import TypingGame from './components/TypingGame';
-import { randomMatch } from './services/roomService';
+import { randomMatch } from './services/room';
 
 // ランダムなIDを生成する関数
 const generateRandomId = () => {
   return 'guest-' + Math.random().toString(36).substring(2, 15);
 };
 
-function App() {
+const App = () => {
   const [userId] = useState<string>(generateRandomId());
   const [userName, setUserName] = useState<string>('ゲスト');
   const [roomId, setRoomId] = useState<string | null>(null);
@@ -95,6 +95,6 @@ function App() {
       )}
     </div>
   );
-}
+};
 
 export default App;

@@ -1,11 +1,11 @@
 import { useState } from 'react';
 
-interface ConnectionStatusProps {
+type ConnectionStatusProps = {
     status: 'connecting' | 'connected' | 'failed' | 'closed';
     onRetry?: () => void;
     onExit?: () => void;
     onRegenerateSignal?: () => Promise<string>;
-}
+};
 
 const ConnectionStatus = (props: ConnectionStatusProps) => {
     const { status, onRetry, onExit, onRegenerateSignal } = props;
