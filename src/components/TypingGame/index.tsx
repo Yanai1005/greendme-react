@@ -49,7 +49,7 @@ const TypingGame = (props: TypingGameProps) => {
         }
     }, [dataChannel, handlePeerMessage]);
 
-    // タイピングゲームのロジック
+    // タイピングゲームのロジック - otherPlayerIdとroomも渡す
     const {
         typingText,
         inputText,
@@ -67,7 +67,9 @@ const TypingGame = (props: TypingGameProps) => {
         roomId,
         userId,
         isReady,
-        dataChannel
+        dataChannel,
+        otherPlayerId,  // 相手プレイヤーIDを渡す
+        room            // roomオブジェクトを渡す
     });
 
     // ローディング状態

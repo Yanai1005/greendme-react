@@ -7,7 +7,9 @@ interface UseTypingGameProps {
     roomId: string;
     userId: string;
     isReady: boolean;
-    dataChannel: React.RefObject<RTCDataChannel | null>; // MutableRefObject から RefObject に変更
+    dataChannel: React.RefObject<RTCDataChannel | null>;
+    otherPlayerId: string | null;
+    room: any;
 }
 
 interface UseTypingGameReturn {
@@ -21,7 +23,7 @@ interface UseTypingGameReturn {
     gameStatus: 'waiting' | 'ready' | 'playing' | 'finished';
     isNotFoundEnding: boolean;
     handleInputChange: (e: React.ChangeEvent<HTMLInputElement>) => Promise<void>;
-    toggleReady: () => Promise<void>; // boolean ではなく void を返すように変更
+    toggleReady: () => Promise<void>;
     getCurrentQuestionNumber: () => number;
     getTotalQuestionCount: () => number;
 }
@@ -30,7 +32,9 @@ export const useTypingGame = ({
     roomId,
     userId,
     isReady,
-    dataChannel
+    dataChannel,
+    otherPlayerId,
+    room
 }: UseTypingGameProps): UseTypingGameReturn => {
     const [typingText, setTypingText] = useState('');
     const [inputText, setInputText] = useState('');
@@ -81,12 +85,10 @@ export const useTypingGame = ({
         score: number,
         setIndex: number,
         questionIndex: number
-    ): Promise<void> => { // 戻り値の型を void に変更
+    ): Promise<void> => {
         try {
             const currentTotalProgress = calculateTotalProgress();
             setTotalProgress(currentTotalProgress);
-
-            // Firestoreに進捗を保存
             const roomRef = doc(db, 'rooms', roomId);
             await updateDoc(roomRef, {
                 [`gameState.players.${userId}.progress`]: progress,
@@ -96,7 +98,6 @@ export const useTypingGame = ({
                 [`gameState.players.${userId}.currentQuestionIndex`]: questionIndex
             });
 
-            // 戻り値を返さない
         } catch (error) {
             console.error("Error updating player state:", error);
             throw error;
@@ -139,7 +140,6 @@ export const useTypingGame = ({
         }
     }, [isReady, roomId, userId]);
 
-    // 入力テキストが変更されたとき
     const handleInputChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>): Promise<void> => {
         if (gameStatus !== 'playing') return;
 
@@ -156,7 +156,6 @@ export const useTypingGame = ({
             }
         }
 
-        // 長さの違いによるペナルティを計算
         const lengthPenalty = Math.abs(inputValue.length - typingText.length) * 5;
 
         // 達成度を計算（最大100%）
@@ -176,7 +175,6 @@ export const useTypingGame = ({
             console.error("Error updating progress in Firebase:", err);
         }
 
-        // タイピングが完了したかチェック
         if (inputValue === typingText) {
             console.log("Question completed:", typingText);
 
@@ -191,7 +189,6 @@ export const useTypingGame = ({
                     console.error("Error updating final progress:", err);
                 }
 
-                // ゲーム終了を相手に通知
                 if (dataChannel.current?.readyState === 'open') {
                     dataChannel.current.send(JSON.stringify({
                         type: 'notFound',
@@ -199,19 +196,15 @@ export const useTypingGame = ({
                     }));
                 }
             } else {
-                // 通常の完了処理 - 強制的に次の問題を設定
                 console.log("Question completed, moving to next question");
 
-                // 次の問題のインデックスを計算
                 let nextSetIndex = currentSetIndex;
                 let nextQuestionIndex = currentQuestionIndex + 1;
                 let nextQuestion = '';
 
-                // セット内に次の問題がある場合
                 if (nextQuestionIndex < QUESTION_SETS[currentSetIndex].length) {
                     nextQuestion = QUESTION_SETS[currentSetIndex][nextQuestionIndex];
                 } else {
-                    // 次のセットに移動
                     nextSetIndex = (currentSetIndex + 1) % QUESTION_SETS.length;
                     nextQuestionIndex = 0;
                     nextQuestion = QUESTION_SETS[nextSetIndex][0];
@@ -272,16 +265,33 @@ export const useTypingGame = ({
         userId
     ]);
 
-    // ゲーム開始ロジック
     useEffect(() => {
         if (gameStatus === 'waiting' && isReady) {
-            console.log("Player is ready, set to playing");
-            setGameStatus('playing');
-            if (!startTime) {
-                setStartTime(Date.now());
+            if (otherPlayerId && room?.gameState?.players) {
+                const otherPlayerReady = room.gameState.players[otherPlayerId]?.ready || false;
+
+                if (otherPlayerReady) {
+                    console.log("Both players are ready, starting the game");
+                    setGameStatus('playing');
+
+                    const roomRef = doc(db, 'rooms', roomId);
+                    updateDoc(roomRef, {
+                        'gameState.status': 'playing'
+                    }).catch(err => {
+                        console.error("Error updating game status:", err);
+                    });
+
+                    if (!startTime) {
+                        setStartTime(Date.now());
+                    }
+                } else {
+                    console.log("Waiting for other player to be ready");
+                }
+            } else {
+                console.log("Waiting for other player to join");
             }
         }
-    }, [gameStatus, isReady, startTime]);
+    }, [gameStatus, isReady, otherPlayerId, room, roomId, startTime]);
 
     return {
         typingText,

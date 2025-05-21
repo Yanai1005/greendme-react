@@ -14,7 +14,6 @@ const GameResult = (props: GameResultProps) => {
                 <p className="mb-4">このコマンドは実行できません</p>
                 {endReason && <p className="text-sm text-gray-600 mt-2 mb-4">{endReason}</p>}
 
-                {/* Line QR コード */}
                 <div className="mt-4 flex flex-col items-center">
                     <p className="text-sm font-medium mb-3">カメラで読み取ってください:</p>
                     <img
