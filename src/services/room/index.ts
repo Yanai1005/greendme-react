@@ -86,7 +86,7 @@ export const joinRoom = async (roomId: string, userId: string): Promise<boolean>
         // 明示的に GameState 型を指定し、players が必ず存在するようにする
         const gameState: GameState = roomData.gameState || {
             status: 'waiting',
-            players: {} // 空のオブジェクトでも型的に問題ないように
+            players: {}
         };
 
         // players が undefined でないことを保証

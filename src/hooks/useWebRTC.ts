@@ -7,6 +7,8 @@ interface UseWebRTCProps {
     userId: string;
     otherPlayerId: string | null;
     isHost: boolean;
+    bothPlayersReady: boolean;
+    shouldStartConnection: boolean;
 }
 
 interface UseWebRTCReturn {
@@ -15,19 +17,47 @@ interface UseWebRTCReturn {
     dataChannel: React.RefObject<RTCDataChannel | null>;
     sendMessage: (message: object) => boolean;
     resetConnection: () => void;
+    connectionState: 'idle' | 'initializing' | 'connecting' | 'connected' | 'failed';
 }
 
 export const useWebRTC = ({
     roomId,
     userId,
     otherPlayerId,
-    isHost
+    isHost,
+    bothPlayersReady,
+    shouldStartConnection
 }: UseWebRTCProps): UseWebRTCReturn => {
     const [isConnected, setIsConnected] = useState(false);
     const [connectionError, setConnectionError] = useState<string | null>(null);
+    const [connectionState, setConnectionState] = useState<'idle' | 'initializing' | 'connecting' | 'connected' | 'failed'>('idle');
+
     const peerConnection = useRef<RTCPeerConnection | null>(null);
     const dataChannel = useRef<RTCDataChannel | null>(null);
     const rtcInitialized = useRef<boolean>(false);
+    const iceCandidateQueue = useRef<RTCIceCandidate[]>([]);
+    const retryCount = useRef<number>(0);
+    const maxRetries = 3;
+
+    const initializationDelay = useRef<NodeJS.Timeout | null>(null);
+    const connectionTimeout = useRef<NodeJS.Timeout | null>(null);
+
+    // ICE設定
+    const iceServers = [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        {
+            urls: 'turn:openrelay.metered.ca:80',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+        },
+        {
+            urls: 'turn:openrelay.metered.ca:443',
+            username: 'openrelayproject',
+            credential: 'openrelayproject'
+        }
+    ];
 
     // メッセージ送信ユーティリティ
     const sendMessage = useCallback((message: object): boolean => {
@@ -49,6 +79,15 @@ export const useWebRTC = ({
     // WebRTC接続のリセット
     const resetConnection = useCallback(() => {
         console.log("Resetting WebRTC connection");
+        if (initializationDelay.current) {
+            clearTimeout(initializationDelay.current);
+            initializationDelay.current = null;
+        }
+
+        if (connectionTimeout.current) {
+            clearTimeout(connectionTimeout.current);
+            connectionTimeout.current = null;
+        }
 
         // 既存の接続をクリーンアップ
         if (peerConnection.current) {
@@ -63,331 +102,416 @@ export const useWebRTC = ({
 
         setConnectionError(null);
         setIsConnected(false);
+        setConnectionState('idle');
         rtcInitialized.current = false;
+        iceCandidateQueue.current = [];
+        retryCount.current++;
 
-        // 少し待ってから再接続を試みる
-        setTimeout(() => {
-            console.log("Attempting to reconnect WebRTC");
-            rtcInitialized.current = false;
-        }, 2000);
-    }, []);
-
-    // WebRTC接続の初期化
-    useEffect(() => {
-        // 部屋情報と他のプレイヤーが存在する場合のみ初期化
-        if (!roomId || !otherPlayerId || rtcInitialized.current) {
-            console.log("Skipping WebRTC initialization:",
-                !roomId ? "no roomId" :
-                    !otherPlayerId ? "no other player" :
-                        "already initialized");
+        if (retryCount.current >= maxRetries) {
+            setConnectionError("接続の再試行回数が上限に達しました。ページを再読み込みしてください。");
+            setConnectionState('failed');
             return;
         }
 
-        console.log("Initializing WebRTC connection with player:", otherPlayerId);
+        setTimeout(() => {
+            console.log(`準備完了後に再接続を試行します (attempt ${retryCount.current + 1}/${maxRetries})`);
+            setConnectionState('idle');
+            rtcInitialized.current = false;
+        }, 3000);
+    }, []);
 
-        // 既存の接続をクリーンアップ
-        if (peerConnection.current) {
-            console.log("Cleaning up existing connection");
-            peerConnection.current.close();
-            peerConnection.current = null;
+    // ICE候補をキューに追加する関数
+    const addIceCandidateToQueue = useCallback((candidate: RTCIceCandidate) => {
+        if (peerConnection.current?.remoteDescription) {
+            peerConnection.current.addIceCandidate(candidate).catch(err => {
+                console.warn("Error adding ICE candidate:", err);
+            });
+        } else {
+            iceCandidateQueue.current.push(candidate);
+            console.log(`ICE candidate queued (total: ${iceCandidateQueue.current.length})`);
+        }
+    }, []);
+
+    // キューに溜まったICE候補を処理する関数
+    const processQueuedIceCandidates = useCallback(async () => {
+        if (!peerConnection.current?.remoteDescription || iceCandidateQueue.current.length === 0) {
+            return;
         }
 
-        if (dataChannel.current) {
-            dataChannel.current.close();
-            dataChannel.current = null;
+        console.log(`Processing ${iceCandidateQueue.current.length} queued ICE candidates`);
+
+        for (const candidate of iceCandidateQueue.current) {
+            try {
+                await peerConnection.current.addIceCandidate(candidate);
+            } catch (err) {
+                console.warn("Error adding queued ICE candidate:", err);
+            }
+        }
+        iceCandidateQueue.current = [];
+    }, []);
+
+    // WebRTC初期化の実行
+    const initializeWebRTC = useCallback(async () => {
+        if (rtcInitialized.current || !otherPlayerId) {
+            console.log("WebRTC initialization skipped:", rtcInitialized.current ? "already initialized" : "no other player");
+            return;
         }
 
+        console.log(`Starting WebRTC initialization as ${isHost ? 'HOST' : 'GUEST'} with player:`, otherPlayerId);
+
+        setConnectionState('initializing');
         setConnectionError(null);
         rtcInitialized.current = true;
+        iceCandidateQueue.current = [];
 
-        // 接続タイムアウトの参照を保持
-        let connectionTimeoutId: NodeJS.Timeout | null = null;
+        try {
+            // WebRTC接続の設定
+            const pc = new RTCPeerConnection({
+                iceServers,
+                iceCandidatePoolSize: 10,
+                iceTransportPolicy: 'all',
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require'
+            });
+            peerConnection.current = pc;
 
-        const initWebRTC = async () => {
-            try {
-                // WebRTC接続の設定
-                const pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        { urls: 'stun:stun2.l.google.com:19302' }
-                    ],
-                    iceCandidatePoolSize: 10
-                });
-                peerConnection.current = pc;
+            console.log("RTCPeerConnection created successfully");
 
-                console.log("RTCPeerConnection created, signaling state:", pc.signalingState);
+            // 接続状態の詳細な監視
+            pc.oniceconnectionstatechange = () => {
+                console.log("ICE connection state:", pc.iceConnectionState);
 
-                // 接続状態の監視
-                pc.oniceconnectionstatechange = () => {
-                    console.log("ICE connection state:", pc.iceConnectionState);
-                    if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+                switch (pc.iceConnectionState) {
+                    case 'checking':
+                        setConnectionState('connecting');
+                        break;
+                    case 'connected':
+                    case 'completed':
                         setIsConnected(true);
                         setConnectionError(null);
-                        if (connectionTimeoutId) {
-                            clearTimeout(connectionTimeoutId);
-                            connectionTimeoutId = null;
+                        setConnectionState('connected');
+                        retryCount.current = 0;
+                        if (connectionTimeout.current) {
+                            clearTimeout(connectionTimeout.current);
+                            connectionTimeout.current = null;
                         }
-                    } else if (pc.iceConnectionState === 'failed' || pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'closed') {
+                        break;
+                    case 'failed':
                         setIsConnected(false);
-                        setConnectionError(`WebRTC接続エラー: ${pc.iceConnectionState}`);
-                    }
-                };
-
-                pc.onconnectionstatechange = () => {
-                    console.log("Connection state:", pc.connectionState);
-                    if (pc.connectionState === 'connected') {
-                        setIsConnected(true);
-                        setConnectionError(null);
-                        if (connectionTimeoutId) {
-                            clearTimeout(connectionTimeoutId);
-                            connectionTimeoutId = null;
-                        }
-                    } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected' || pc.connectionState === 'closed') {
+                        setConnectionError(`ICE接続が失敗しました`);
+                        setConnectionState('failed');
+                        break;
+                    case 'disconnected':
                         setIsConnected(false);
-                        setConnectionError(`WebRTC接続エラー: ${pc.connectionState}`);
-                    }
-                };
-
-                // ICE candidateの処理
-                pc.onicecandidate = async (event) => {
-                    if (event.candidate) {
-                        console.log("ICE candidate generated:", event.candidate);
-                        // ICE candidateを保存
-                        try {
-                            // 現在の接続情報を取得
-                            let currentData: RTCConnectionData = {
-                                candidates: []
-                            };
-
-                            const localDesc = pc.localDescription;
-                            if (localDesc) {
-                                // シリアライズ可能な形式に変換
-                                const serializedDesc = {
-                                    type: localDesc.type,
-                                    sdp: localDesc.sdp
-                                };
-
-                                if (isHost) {
-                                    currentData.offer = serializedDesc;
-                                } else {
-                                    currentData.answer = serializedDesc;
-                                }
+                        setTimeout(() => {
+                            if (pc.iceConnectionState === 'disconnected') {
+                                setConnectionError("接続が切断されました");
+                                setConnectionState('failed');
                             }
+                        }, 5000);
+                        break;
+                    case 'closed':
+                        setIsConnected(false);
+                        setConnectionState('idle');
+                        break;
+                }
+            };
 
-                            // ICE候補をシリアライズ可能な形式に変換
-                            const serializedCandidate = {
-                                candidate: event.candidate.candidate,
-                                sdpMid: event.candidate.sdpMid,
-                                sdpMLineIndex: event.candidate.sdpMLineIndex,
-                                usernameFragment: event.candidate.usernameFragment
+            pc.onconnectionstatechange = () => {
+                console.log(" Connection state:", pc.connectionState);
+            };
+
+            // ICE候補の処理
+            pc.onicecandidate = async (event) => {
+                if (event.candidate) {
+                    console.log(" ICE candidate generated:", event.candidate.type);
+
+                    try {
+                        let currentData: RTCConnectionData = { candidates: [] };
+
+                        const localDesc = pc.localDescription;
+                        if (localDesc) {
+                            const serializedDesc = {
+                                type: localDesc.type,
+                                sdp: localDesc.sdp
                             };
 
-                            // 候補を追加
-                            currentData.candidates = [serializedCandidate];
-
-                            await saveRTCData(roomId, userId, currentData);
-                            console.log("RTC data saved");
-                        } catch (error) {
-                            console.error("Error saving RTC data:", error);
-                            setConnectionError("ICE candidateの保存に失敗しました");
+                            if (isHost) {
+                                currentData.offer = serializedDesc;
+                            } else {
+                                currentData.answer = serializedDesc;
+                            }
                         }
-                    }
-                };
 
-                // タイムアウト処理
-                connectionTimeoutId = setTimeout(() => {
-                    if (!isConnected && peerConnection.current) {
-                        console.log("Connection timeout, current state:", peerConnection.current.connectionState);
-                        setConnectionError("WebRTC接続がタイムアウトしました。再接続してください。");
-                    }
-                }, 30000);
-
-                const handleChannelOpen = () => {
-                    console.log('Data channel opened');
-                    setIsConnected(true);
-                    setConnectionError(null);
-                    if (connectionTimeoutId) {
-                        clearTimeout(connectionTimeoutId);
-                        connectionTimeoutId = null;
-                    }
-
-                    // 接続成功を通知
-                    sendMessage({
-                        type: 'connected',
-                        userId
-                    });
-                };
-
-                const handleChannelClose = () => {
-                    console.log('Data channel closed');
-                    setIsConnected(false);
-                };
-
-                const handleChannelError = (error: Event) => {
-                    console.error('Data channel error:', error);
-                    setConnectionError("データチャネルでエラーが発生しました");
-                };
-
-                if (isHost) {
-                    // ホスト側はデータチャネルを作成
-                    try {
-                        const channel = pc.createDataChannel('game', {
-                            ordered: true,
-                            maxRetransmits: 3
-                        });
-                        dataChannel.current = channel;
-
-                        console.log("Data channel created by host");
-
-                        channel.onopen = handleChannelOpen;
-                        channel.onclose = handleChannelClose;
-                        channel.onerror = handleChannelError;
-
-                        // オファーを作成して保存
-                        const offer = await pc.createOffer({
-                            offerToReceiveAudio: false,
-                            offerToReceiveVideo: false
-                        });
-                        await pc.setLocalDescription(offer);
-                        console.log("Offer created:", offer);
-
-                        // オファーをシリアライズ可能な形式に変換
-                        const serializedOffer = {
-                            type: offer.type,
-                            sdp: offer.sdp || ''
+                        const serializedCandidate = {
+                            candidate: event.candidate.candidate,
+                            sdpMid: event.candidate.sdpMid,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex,
+                            usernameFragment: event.candidate.usernameFragment
                         };
 
-                        await saveRTCData(roomId, userId, {
-                            offer: serializedOffer,
-                            candidates: []
-                        });
-                        console.log("Offer saved");
+                        currentData.candidates = [serializedCandidate];
+                        await saveRTCData(roomId, userId, currentData);
                     } catch (error) {
-                        console.error("Error in host setup:", error);
-                        setConnectionError("ホスト側の接続設定に失敗しました");
+                        console.error(" Error saving ICE candidate:", error);
                     }
                 } else {
-                    // ゲスト側はデータチャネルを受信
-                    try {
-                        pc.ondatachannel = (event) => {
-                            const channel = event.channel;
-                            dataChannel.current = channel;
-
-                            console.log("Data channel received by guest");
-
-                            channel.onopen = handleChannelOpen;
-                            channel.onclose = handleChannelClose;
-                            channel.onerror = handleChannelError;
-                        };
-                    } catch (error) {
-                        console.error("Error in guest setup:", error);
-                        setConnectionError("ゲスト側の接続設定に失敗しました");
-                    }
+                    console.log(" ICE gathering complete");
                 }
-            } catch (error) {
-                console.error("Error initializing WebRTC:", error);
-                setConnectionError("WebRTC接続の初期化に失敗しました");
+            };
+
+            // 接続タイムアウト設定
+            connectionTimeout.current = setTimeout(() => {
+                if (connectionState !== 'connected') {
+                    console.log("Connection timeout, triggering reset");
+                    resetConnection();
+                }
+            }, 30000);
+
+            const handleChannelOpen = () => {
+                console.log('Data channel opened successfully');
+                setIsConnected(true);
+                setConnectionError(null);
+                setConnectionState('connected');
+                retryCount.current = 0;
+
+                if (connectionTimeout.current) {
+                    clearTimeout(connectionTimeout.current);
+                    connectionTimeout.current = null;
+                }
+
+                // 接続成功を通知
+                sendMessage({
+                    type: 'connected',
+                    userId
+                });
+            };
+
+            const handleChannelClose = () => {
+                console.log('Data channel closed');
+                setIsConnected(false);
+                setConnectionState('idle');
+            };
+
+            const handleChannelError = (error: Event) => {
+                console.error('Data channel error:', error);
+                setConnectionError("データチャネルでエラーが発生しました");
+                setConnectionState('failed');
+            };
+
+            if (isHost) {
+                console.log("Setting up HOST role");
+
+                // ホスト側はデータチャネルを作成
+                const channel = pc.createDataChannel('game', {
+                    ordered: true,
+                    maxRetransmits: 3
+                });
+                dataChannel.current = channel;
+
+                channel.onopen = handleChannelOpen;
+                channel.onclose = handleChannelClose;
+                channel.onerror = handleChannelError;
+
+                // オファーを作成
+                const offer = await pc.createOffer({
+                    offerToReceiveAudio: false,
+                    offerToReceiveVideo: false
+                });
+                await pc.setLocalDescription(offer);
+                console.log("Offer created and set as local description");
+
+                await new Promise(resolve => setTimeout(resolve, 2000));
+
+                const finalOffer = pc.localDescription;
+                if (finalOffer) {
+                    const serializedOffer = {
+                        type: finalOffer.type,
+                        sdp: finalOffer.sdp || ''
+                    };
+
+                    await saveRTCData(roomId, userId, {
+                        offer: serializedOffer,
+                        candidates: []
+                    });
+                    console.log("Offer saved successfully");
+                }
+            } else {
+                console.log(" Setting up GUEST role");
+
+                // ゲスト側はデータチャネルを受信
+                pc.ondatachannel = (event) => {
+                    const channel = event.channel;
+                    dataChannel.current = channel;
+
+                    console.log("📡 Data channel received by guest");
+
+                    channel.onopen = handleChannelOpen;
+                    channel.onclose = handleChannelClose;
+                    channel.onerror = handleChannelError;
+                };
+            }
+
+            setConnectionState('connecting');
+        } catch (error) {
+            console.error("Error initializing WebRTC:", error);
+            setConnectionError("WebRTC接続の初期化に失敗しました");
+            setConnectionState('failed');
+            rtcInitialized.current = false;
+        }
+    }, [roomId, userId, otherPlayerId, isHost, sendMessage, resetConnection, connectionState]);
+
+    useEffect(() => {
+        const cleanup = () => {
+            if (initializationDelay.current) {
+                clearTimeout(initializationDelay.current);
+                initializationDelay.current = null;
             }
         };
 
-        const initTimeoutId = setTimeout(() => {
-            initWebRTC();
-        }, 1000);
+        // 初期化の条件をチェック
+        const shouldInitialize =
+            roomId &&
+            otherPlayerId &&
+            shouldStartConnection &&
+            bothPlayersReady &&
+            !rtcInitialized.current &&
+            (connectionState === 'idle' || connectionState === 'failed');
 
-        // 相手のWebRTC接続情報を監視
-        console.log("Subscribing to RTC data for:", otherPlayerId);
+        if (!shouldInitialize) {
+            const reason =
+                !roomId ? "no roomId" :
+                    !otherPlayerId ? "no other player" :
+                        !shouldStartConnection ? "connection not requested" :
+                            !bothPlayersReady ? "players not ready" :
+                                rtcInitialized.current ? "already initialized" :
+                                    connectionState !== 'idle' ? `state is ${connectionState}` :
+                                        "unknown";
+
+            console.log(`Skipping WebRTC initialization: ${reason}`);
+            cleanup();
+            return cleanup;
+        }
+
+        console.log(`Scheduling WebRTC initialization in ${isHost ? '1000' : '2000'}ms`);
+
+        // ホストとゲストで初期化タイミングをずらす
+        const delay = isHost ? 1000 : 2000;
+
+        initializationDelay.current = setTimeout(() => {
+            console.log(`Starting WebRTC initialization (${isHost ? 'HOST' : 'GUEST'})`);
+            initializeWebRTC();
+        }, delay);
+
+        return cleanup;
+    }, [
+        roomId,
+        otherPlayerId,
+        shouldStartConnection,
+        bothPlayersReady,
+        isHost,
+        connectionState,
+        initializeWebRTC
+    ]);
+
+    // 相手のWebRTC接続情報を監視
+    useEffect(() => {
+        if (!otherPlayerId || !roomId) {
+            return;
+        }
+
+        console.log("👂 Subscribing to RTC data for:", otherPlayerId);
 
         const unsubscribeRTC = subscribeToRTCData(roomId, otherPlayerId, async (data) => {
             if (!data || !peerConnection.current) {
-                console.log("No RTC data or peer connection");
                 return;
             }
 
-            console.log("RTC data received:", data);
+            console.log(" RTC data received:", Object.keys(data));
 
             try {
-                if (isHost && data.answer) {
-                    // ホスト側はアンサーを受信
-                    console.log("Host received answer, connection state:", peerConnection.current.signalingState);
+                const pc = peerConnection.current;
 
-                    // 接続状態が適切な場合のみ処理
-                    if (peerConnection.current.signalingState === 'have-local-offer') {
-                        await peerConnection.current.setRemoteDescription({
+                if (isHost && data.answer) {
+                    console.log("Host processing answer, signaling state:", pc.signalingState);
+
+                    if (pc.signalingState === 'have-local-offer') {
+                        await pc.setRemoteDescription({
                             type: data.answer.type as RTCSdpType,
                             sdp: data.answer.sdp
                         });
-                        console.log("Remote description set (host)");
-                    } else {
-                        console.warn("Skipping answer processing, connection in wrong state:", peerConnection.current.signalingState);
+                        console.log(" Remote description (answer) set successfully");
+
+                        await processQueuedIceCandidates();
                     }
                 } else if (!isHost && data.offer) {
-                    // ゲスト側はオファーを受信してアンサーを作成
-                    console.log("Guest received offer, connection state:", peerConnection.current.signalingState);
+                    console.log("Guest processing offer, signaling state:", pc.signalingState);
 
-                    // 接続状態が適切な場合のみ処理
-                    if (peerConnection.current.signalingState === 'stable') {
-                        await peerConnection.current.setRemoteDescription({
+                    if (pc.signalingState === 'stable') {
+                        await pc.setRemoteDescription({
                             type: data.offer.type as RTCSdpType,
                             sdp: data.offer.sdp
                         });
-                        console.log("Remote description set (guest)");
+                        console.log("Remote description (offer) set successfully");
 
-                        const answer = await peerConnection.current.createAnswer();
-                        await peerConnection.current.setLocalDescription(answer);
-                        console.log("Answer created:", answer);
+                        await processQueuedIceCandidates();
 
-                        // アンサーをシリアライズ可能な形式に変換
-                        const serializedAnswer = {
-                            type: answer.type,
-                            sdp: answer.sdp || ''
-                        };
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
+                        console.log("📤 Answer created and set as local description");
 
-                        await saveRTCData(roomId, userId, {
-                            answer: serializedAnswer,
-                            candidates: []
-                        });
-                        console.log("Answer saved");
-                    } else {
-                        console.warn("Skipping offer processing, connection in wrong state:", peerConnection.current.signalingState);
+                        await new Promise(resolve => setTimeout(resolve, 1000));
+
+                        const finalAnswer = pc.localDescription;
+                        if (finalAnswer) {
+                            const serializedAnswer = {
+                                type: finalAnswer.type,
+                                sdp: finalAnswer.sdp || ''
+                            };
+
+                            await saveRTCData(roomId, userId, {
+                                answer: serializedAnswer,
+                                candidates: []
+                            });
+                            console.log(" Answer saved successfully");
+                        }
                     }
                 }
 
-                // ICE candidateを追加
+                // ICE candidateを処理
                 if (data.candidates && data.candidates.length > 0) {
-                    for (const candidate of data.candidates) {
-                        if (!candidate) continue;
-
-                        if (!peerConnection.current.remoteDescription) {
-                            console.log("Skipping ICE candidate, remote description not set");
-                            continue;
-                        }
+                    for (const candidateData of data.candidates) {
+                        if (!candidateData) continue;
 
                         try {
-                            console.log("Adding ICE candidate");
-                            await peerConnection.current.addIceCandidate(new RTCIceCandidate(candidate));
+                            const candidate = new RTCIceCandidate(candidateData);
+                            addIceCandidateToQueue(candidate);
                         } catch (icErr) {
-                            console.warn("Error adding ICE candidate:", icErr);
-                            // 個別のICE候補の追加エラーは無視して続行
+                            console.warn(" Error processing ICE candidate:", icErr);
                         }
                     }
                 }
             } catch (error) {
                 console.error("Error handling RTC data:", error);
                 setConnectionError("WebRTC接続データの処理に失敗しました");
+                setConnectionState('failed');
             }
         });
 
-        return () => {
-            console.log("Cleaning up WebRTC connection");
-            unsubscribeRTC();
+        return unsubscribeRTC;
+    }, [roomId, otherPlayerId, isHost, addIceCandidateToQueue, processQueuedIceCandidates, userId]);
 
-            if (connectionTimeoutId) {
-                clearTimeout(connectionTimeoutId);
+    // クリーンアップ
+    useEffect(() => {
+        return () => {
+            console.log("🧹 Cleaning up WebRTC connection");
+
+            if (initializationDelay.current) {
+                clearTimeout(initializationDelay.current);
             }
 
-            if (initTimeoutId) {
-                clearTimeout(initTimeoutId);
+            if (connectionTimeout.current) {
+                clearTimeout(connectionTimeout.current);
             }
 
             if (peerConnection.current) {
@@ -401,14 +525,16 @@ export const useWebRTC = ({
             }
 
             rtcInitialized.current = false;
+            iceCandidateQueue.current = [];
         };
-    }, [roomId, userId, otherPlayerId, isHost, sendMessage]);
+    }, []);
 
     return {
         isConnected,
         connectionError,
         dataChannel,
         sendMessage,
-        resetConnection
+        resetConnection,
+        connectionState
     };
 };
