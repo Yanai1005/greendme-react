@@ -37,25 +37,31 @@ export const useWebRTC = ({
     const rtcInitialized = useRef<boolean>(false);
     const iceCandidateQueue = useRef<RTCIceCandidate[]>([]);
     const retryCount = useRef<number>(0);
-    const maxRetries = 3;
+    const maxRetries = 5;
+
+    const signalingState = useRef<'idle' | 'creating-offer' | 'waiting-answer' | 'processing-offer' | 'connected'>('idle');
+    const remoteDescriptionSet = useRef<boolean>(false);
 
     const initializationDelay = useRef<NodeJS.Timeout | null>(null);
     const connectionTimeout = useRef<NodeJS.Timeout | null>(null);
 
-    // ICE設定
     const iceServers = [
+        // STUN servers
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
+        // TURN server
         {
-            urls: 'turn:openrelay.metered.ca:80',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
+            urls: 'turn:relay.backups.cz',
+            username: 'webrtc',
+            credential: 'webrtc'
         },
         {
-            urls: 'turn:openrelay.metered.ca:443',
-            username: 'openrelayproject',
-            credential: 'openrelayproject'
+            urls: 'turn:relay.backups.cz?transport=tcp',
+            username: 'webrtc',
+            credential: 'webrtc'
         }
     ];
 
@@ -76,9 +82,9 @@ export const useWebRTC = ({
         return false;
     }, []);
 
-    // WebRTC接続のリセット
     const resetConnection = useCallback(() => {
-        console.log("Resetting WebRTC connection");
+        console.log("Performing complete WebRTC reset");
+
         if (initializationDelay.current) {
             clearTimeout(initializationDelay.current);
             initializationDelay.current = null;
@@ -105,26 +111,30 @@ export const useWebRTC = ({
         setConnectionState('idle');
         rtcInitialized.current = false;
         iceCandidateQueue.current = [];
+        signalingState.current = 'idle';
+        remoteDescriptionSet.current = false;
         retryCount.current++;
 
         if (retryCount.current >= maxRetries) {
-            setConnectionError("接続の再試行回数が上限に達しました。ページを再読み込みしてください。");
+            setConnectionError(`接続に${maxRetries}回失敗しました。ネットワーク環境を確認してページを再読み込みしてください。`);
             setConnectionState('failed');
             return;
         }
 
+        const backoffTime = Math.min(3000 * Math.pow(1.5, retryCount.current), 15000);
+        console.log(` Scheduling retry ${retryCount.current}/${maxRetries} in ${backoffTime}ms`);
+
         setTimeout(() => {
-            console.log(`準備完了後に再接続を試行します (attempt ${retryCount.current + 1}/${maxRetries})`);
+            console.log(` Retry attempt ${retryCount.current}/${maxRetries}`);
             setConnectionState('idle');
             rtcInitialized.current = false;
-        }, 3000);
+        }, backoffTime);
     }, []);
 
-    // ICE候補をキューに追加する関数
     const addIceCandidateToQueue = useCallback((candidate: RTCIceCandidate) => {
-        if (peerConnection.current?.remoteDescription) {
+        if (peerConnection.current?.remoteDescription && remoteDescriptionSet.current) {
             peerConnection.current.addIceCandidate(candidate).catch(err => {
-                console.warn("Error adding ICE candidate:", err);
+                console.warn(" Error adding ICE candidate:", err);
             });
         } else {
             iceCandidateQueue.current.push(candidate);
@@ -132,40 +142,41 @@ export const useWebRTC = ({
         }
     }, []);
 
-    // キューに溜まったICE候補を処理する関数
     const processQueuedIceCandidates = useCallback(async () => {
-        if (!peerConnection.current?.remoteDescription || iceCandidateQueue.current.length === 0) {
+        if (!peerConnection.current?.remoteDescription || !remoteDescriptionSet.current || iceCandidateQueue.current.length === 0) {
             return;
         }
 
-        console.log(`Processing ${iceCandidateQueue.current.length} queued ICE candidates`);
+        console.log(` Processing ${iceCandidateQueue.current.length} queued ICE candidates`);
 
         for (const candidate of iceCandidateQueue.current) {
             try {
                 await peerConnection.current.addIceCandidate(candidate);
+                console.log("ICE candidate added successfully");
             } catch (err) {
-                console.warn("Error adding queued ICE candidate:", err);
+                console.warn(" Error adding queued ICE candidate:", err);
             }
         }
         iceCandidateQueue.current = [];
     }, []);
 
-    // WebRTC初期化の実行
+    // WebRTC初期化
     const initializeWebRTC = useCallback(async () => {
         if (rtcInitialized.current || !otherPlayerId) {
-            console.log("WebRTC initialization skipped:", rtcInitialized.current ? "already initialized" : "no other player");
+            console.log(" WebRTC initialization skipped:", rtcInitialized.current ? "already initialized" : "no other player");
             return;
         }
 
-        console.log(`Starting WebRTC initialization as ${isHost ? 'HOST' : 'GUEST'} with player:`, otherPlayerId);
+        console.log(` Starting WebRTC initialization as ${isHost ? 'HOST' : 'GUEST'} (attempt ${retryCount.current + 1}/${maxRetries})`);
 
         setConnectionState('initializing');
         setConnectionError(null);
         rtcInitialized.current = true;
         iceCandidateQueue.current = [];
+        signalingState.current = 'idle';
+        remoteDescriptionSet.current = false;
 
         try {
-            // WebRTC接続の設定
             const pc = new RTCPeerConnection({
                 iceServers,
                 iceCandidatePoolSize: 10,
@@ -175,11 +186,11 @@ export const useWebRTC = ({
             });
             peerConnection.current = pc;
 
-            console.log("RTCPeerConnection created successfully");
+            console.log(" RTCPeerConnection created with enhanced configuration");
 
-            // 接続状態の詳細な監視
+            // 詳細な接続状態監視
             pc.oniceconnectionstatechange = () => {
-                console.log("ICE connection state:", pc.iceConnectionState);
+                console.log(`ICE connection state: ${pc.iceConnectionState}`);
 
                 switch (pc.iceConnectionState) {
                     case 'checking':
@@ -190,25 +201,33 @@ export const useWebRTC = ({
                         setIsConnected(true);
                         setConnectionError(null);
                         setConnectionState('connected');
+                        signalingState.current = 'connected';
                         retryCount.current = 0;
                         if (connectionTimeout.current) {
                             clearTimeout(connectionTimeout.current);
                             connectionTimeout.current = null;
                         }
+                        console.log(" WebRTC connection established successfully!");
                         break;
                     case 'failed':
+                        console.log(" ICE connection failed, triggering reset");
                         setIsConnected(false);
-                        setConnectionError(`ICE接続が失敗しました`);
+                        setConnectionError(`ICE接続失敗 (試行 ${retryCount.current + 1}/${maxRetries})`);
                         setConnectionState('failed');
+                        setTimeout(() => {
+                            if (retryCount.current < maxRetries) {
+                                resetConnection();
+                            }
+                        }, 2000);
                         break;
                     case 'disconnected':
                         setIsConnected(false);
                         setTimeout(() => {
                             if (pc.iceConnectionState === 'disconnected') {
-                                setConnectionError("接続が切断されました");
-                                setConnectionState('failed');
+                                console.log("🔌 Connection lost, attempting to reconnect");
+                                resetConnection();
                             }
-                        }, 5000);
+                        }, 8000);
                         break;
                     case 'closed':
                         setIsConnected(false);
@@ -218,13 +237,17 @@ export const useWebRTC = ({
             };
 
             pc.onconnectionstatechange = () => {
-                console.log(" Connection state:", pc.connectionState);
+                console.log(`Connection state: ${pc.connectionState}`);
+            };
+
+            pc.onicegatheringstatechange = () => {
+                console.log(` ICE gathering state: ${pc.iceGatheringState}`);
             };
 
             // ICE候補の処理
             pc.onicecandidate = async (event) => {
                 if (event.candidate) {
-                    console.log(" ICE candidate generated:", event.candidate.type);
+                    console.log(` New ICE candidate: ${event.candidate.type} (${event.candidate.protocol})`);
 
                     try {
                         let currentData: RTCConnectionData = { candidates: [] };
@@ -256,20 +279,19 @@ export const useWebRTC = ({
                         console.error(" Error saving ICE candidate:", error);
                     }
                 } else {
-                    console.log(" ICE gathering complete");
+                    console.log(" ICE gathering completed");
                 }
             };
 
-            // 接続タイムアウト設定
             connectionTimeout.current = setTimeout(() => {
                 if (connectionState !== 'connected') {
-                    console.log("Connection timeout, triggering reset");
+                    console.log(" Connection timeout, triggering reset");
                     resetConnection();
                 }
-            }, 30000);
+            }, 60000);
 
             const handleChannelOpen = () => {
-                console.log('Data channel opened successfully');
+                console.log(' Data channel opened successfully');
                 setIsConnected(true);
                 setConnectionError(null);
                 setConnectionState('connected');
@@ -280,7 +302,6 @@ export const useWebRTC = ({
                     connectionTimeout.current = null;
                 }
 
-                // 接続成功を通知
                 sendMessage({
                     type: 'connected',
                     userId
@@ -288,21 +309,20 @@ export const useWebRTC = ({
             };
 
             const handleChannelClose = () => {
-                console.log('Data channel closed');
+                console.log(' Data channel closed');
                 setIsConnected(false);
                 setConnectionState('idle');
             };
 
             const handleChannelError = (error: Event) => {
-                console.error('Data channel error:', error);
-                setConnectionError("データチャネルでエラーが発生しました");
+                console.error(' Data channel error:', error);
+                setConnectionError("データチャネルエラーが発生しました");
                 setConnectionState('failed');
             };
 
             if (isHost) {
-                console.log("Setting up HOST role");
+                console.log(" Setting up HOST role with delayed offer creation");
 
-                // ホスト側はデータチャネルを作成
                 const channel = pc.createDataChannel('game', {
                     ordered: true,
                     maxRetransmits: 3
@@ -313,15 +333,37 @@ export const useWebRTC = ({
                 channel.onclose = handleChannelClose;
                 channel.onerror = handleChannelError;
 
-                // オファーを作成
+                signalingState.current = 'creating-offer';
                 const offer = await pc.createOffer({
                     offerToReceiveAudio: false,
                     offerToReceiveVideo: false
                 });
                 await pc.setLocalDescription(offer);
-                console.log("Offer created and set as local description");
+                console.log("📤 Offer created and set as local description");
 
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                await new Promise<void>((resolve) => {
+                    const maxWaitTime = 10000;
+                    const startTime = Date.now();
+
+                    const checkGathering = () => {
+                        if (pc.iceGatheringState === 'complete' || Date.now() - startTime > maxWaitTime) {
+                            resolve();
+                        } else {
+                            setTimeout(checkGathering, 500);
+                        }
+                    };
+
+                    if (pc.iceGatheringState === 'complete') {
+                        resolve();
+                    } else {
+                        pc.addEventListener('icegatheringstatechange', () => {
+                            if (pc.iceGatheringState === 'complete') {
+                                resolve();
+                            }
+                        }, { once: true });
+                        checkGathering();
+                    }
+                });
 
                 const finalOffer = pc.localDescription;
                 if (finalOffer) {
@@ -334,12 +376,14 @@ export const useWebRTC = ({
                         offer: serializedOffer,
                         candidates: []
                     });
-                    console.log("Offer saved successfully");
+
+                    signalingState.current = 'waiting-answer';
+                    console.log(" Offer saved, waiting for answer");
                 }
             } else {
-                console.log(" Setting up GUEST role");
+                console.log("Setting up GUEST role");
 
-                // ゲスト側はデータチャネルを受信
+                // ゲスト側の処理
                 pc.ondatachannel = (event) => {
                     const channel = event.channel;
                     dataChannel.current = channel;
@@ -354,10 +398,11 @@ export const useWebRTC = ({
 
             setConnectionState('connecting');
         } catch (error) {
-            console.error("Error initializing WebRTC:", error);
-            setConnectionError("WebRTC接続の初期化に失敗しました");
+            console.error(" Error initializing WebRTC:", error);
+            setConnectionError("WebRTC初期化に失敗しました");
             setConnectionState('failed');
             rtcInitialized.current = false;
+            setTimeout(() => resetConnection(), 3000);
         }
     }, [roomId, userId, otherPlayerId, isHost, sendMessage, resetConnection, connectionState]);
 
@@ -369,7 +414,6 @@ export const useWebRTC = ({
             }
         };
 
-        // 初期化の条件をチェック
         const shouldInitialize =
             roomId &&
             otherPlayerId &&
@@ -379,88 +423,75 @@ export const useWebRTC = ({
             (connectionState === 'idle' || connectionState === 'failed');
 
         if (!shouldInitialize) {
-            const reason =
-                !roomId ? "no roomId" :
-                    !otherPlayerId ? "no other player" :
-                        !shouldStartConnection ? "connection not requested" :
-                            !bothPlayersReady ? "players not ready" :
-                                rtcInitialized.current ? "already initialized" :
-                                    connectionState !== 'idle' ? `state is ${connectionState}` :
-                                        "unknown";
-
-            console.log(`Skipping WebRTC initialization: ${reason}`);
             cleanup();
             return cleanup;
         }
 
-        console.log(`Scheduling WebRTC initialization in ${isHost ? '1000' : '2000'}ms`);
+        console.log(` Scheduling WebRTC initialization in ${isHost ? '2000' : '4000'}ms`);
 
-        // ホストとゲストで初期化タイミングをずらす
-        const delay = isHost ? 1000 : 2000;
+        const delay = isHost ? 2000 : 4000;
 
         initializationDelay.current = setTimeout(() => {
-            console.log(`Starting WebRTC initialization (${isHost ? 'HOST' : 'GUEST'})`);
+            console.log(` Starting WebRTC initialization (${isHost ? 'HOST' : 'GUEST'})`);
             initializeWebRTC();
         }, delay);
 
         return cleanup;
-    }, [
-        roomId,
-        otherPlayerId,
-        shouldStartConnection,
-        bothPlayersReady,
-        isHost,
-        connectionState,
-        initializeWebRTC
-    ]);
+    }, [roomId, otherPlayerId, shouldStartConnection, bothPlayersReady, isHost, connectionState, initializeWebRTC]);
 
-    // 相手のWebRTC接続情報を監視
     useEffect(() => {
         if (!otherPlayerId || !roomId) {
             return;
         }
 
-        console.log("👂 Subscribing to RTC data for:", otherPlayerId);
+        console.log(" Subscribing to RTC data for:", otherPlayerId);
 
         const unsubscribeRTC = subscribeToRTCData(roomId, otherPlayerId, async (data) => {
             if (!data || !peerConnection.current) {
                 return;
             }
 
-            console.log(" RTC data received:", Object.keys(data));
+            console.log(" RTC data received:", Object.keys(data), "Signaling state:", peerConnection.current.signalingState);
 
             try {
                 const pc = peerConnection.current;
 
-                if (isHost && data.answer) {
-                    console.log("Host processing answer, signaling state:", pc.signalingState);
+                if (isHost && data.answer && signalingState.current === 'waiting-answer') {
+                    console.log(" Host processing answer");
 
                     if (pc.signalingState === 'have-local-offer') {
                         await pc.setRemoteDescription({
                             type: data.answer.type as RTCSdpType,
                             sdp: data.answer.sdp
                         });
+                        remoteDescriptionSet.current = true;
+                        signalingState.current = 'connected';
                         console.log(" Remote description (answer) set successfully");
 
                         await processQueuedIceCandidates();
+                    } else {
+                        console.warn(`Skipping answer processing, wrong signaling state: ${pc.signalingState}`);
                     }
-                } else if (!isHost && data.offer) {
-                    console.log("Guest processing offer, signaling state:", pc.signalingState);
+                } else if (!isHost && data.offer && signalingState.current === 'idle') {
+                    console.log(" Guest processing offer");
 
                     if (pc.signalingState === 'stable') {
+                        signalingState.current = 'processing-offer';
+
                         await pc.setRemoteDescription({
                             type: data.offer.type as RTCSdpType,
                             sdp: data.offer.sdp
                         });
-                        console.log("Remote description (offer) set successfully");
+                        remoteDescriptionSet.current = true;
+                        console.log(" Remote description (offer) set successfully");
 
                         await processQueuedIceCandidates();
 
                         const answer = await pc.createAnswer();
                         await pc.setLocalDescription(answer);
-                        console.log("📤 Answer created and set as local description");
+                        console.log(" Answer created and set as local description");
 
-                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        await new Promise(resolve => setTimeout(resolve, 2000));
 
                         const finalAnswer = pc.localDescription;
                         if (finalAnswer) {
@@ -473,8 +504,12 @@ export const useWebRTC = ({
                                 answer: serializedAnswer,
                                 candidates: []
                             });
+
+                            signalingState.current = 'connected';
                             console.log(" Answer saved successfully");
                         }
+                    } else {
+                        console.warn(`Skipping offer processing, wrong signaling state: ${pc.signalingState}`);
                     }
                 }
 
@@ -492,14 +527,15 @@ export const useWebRTC = ({
                     }
                 }
             } catch (error) {
-                console.error("Error handling RTC data:", error);
+                console.error(" Error handling RTC data:", error);
                 setConnectionError("WebRTC接続データの処理に失敗しました");
                 setConnectionState('failed');
+                setTimeout(() => resetConnection(), 3000);
             }
         });
 
         return unsubscribeRTC;
-    }, [roomId, otherPlayerId, isHost, addIceCandidateToQueue, processQueuedIceCandidates, userId]);
+    }, [roomId, otherPlayerId, isHost, addIceCandidateToQueue, processQueuedIceCandidates, userId, resetConnection]);
 
     // クリーンアップ
     useEffect(() => {
@@ -526,6 +562,8 @@ export const useWebRTC = ({
 
             rtcInitialized.current = false;
             iceCandidateQueue.current = [];
+            signalingState.current = 'idle';
+            remoteDescriptionSet.current = false;
         };
     }, []);
 
