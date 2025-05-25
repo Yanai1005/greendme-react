@@ -14,6 +14,7 @@ import type {
     Message,
     RTCConnectionData,
     GameState,
+    PlayerState,
 } from './types';
 
 // コレクション名の定数
@@ -41,7 +42,8 @@ export const createRoom = async (name: string, creatorId: string, gameType: stri
                     [creatorId]: {
                         ready: false,
                         score: 0,
-                        progress: 0
+                        progress: 0,
+                        totalProgress: 0
                     }
                 }
             }
@@ -86,18 +88,19 @@ export const joinRoom = async (roomId: string, userId: string): Promise<boolean>
         // 明示的に GameState 型を指定し、players が必ず存在するようにする
         const gameState: GameState = roomData.gameState || {
             status: 'waiting',
-            players: {}
+            players: {} as { [key: string]: PlayerState }
         };
 
         // players が undefined でないことを保証
         if (!gameState.players) {
-            gameState.players = {};
+            gameState.players = {} as { [key: string]: PlayerState };
         }
 
         gameState.players[userId] = {
             ready: false,
             score: 0,
-            progress: 0
+            progress: 0,
+            totalProgress: 0
         };
 
         const updatedParticipants = [...participants, userId];
@@ -153,12 +156,12 @@ export const leaveRoom = async (roomId: string, userId: string): Promise<boolean
         // 型を明示的に指定
         const gameState: GameState = roomData.gameState || {
             status: 'waiting',
-            players: {}
+            players: {} as { [key: string]: PlayerState }
         };
 
         // players が存在することを確認
-        if (gameState.players && gameState.players[userId]) {
-            delete gameState.players[userId];
+        if (!gameState.players) {
+            gameState.players = {} as { [key: string]: PlayerState };
         }
 
         await updateDoc(roomRef, {
@@ -204,8 +207,13 @@ export const getAvailableRooms = async (): Promise<Room[]> => {
             // gameState が存在することを確認
             const gameState: GameState = data.gameState || {
                 status: 'waiting',
-                players: {}
+                players: {} as { [key: string]: PlayerState }
             };
+
+            // players が未定義の場合に備える
+            if (!gameState.players) {
+                gameState.players = {} as { [key: string]: PlayerState };
+            }
 
             const roomData: Room = {
                 id: doc.id,
@@ -304,12 +312,12 @@ export const subscribeToRoom = (roomId: string, callback: (room: Room | null) =>
             // gameState が必ず存在し、players が含まれるように保証
             const gameState: GameState = data.gameState || {
                 status: 'waiting',
-                players: {}
+                players: {} as { [key: string]: PlayerState }
             };
 
             // players が未定義の場合に備える
             if (!gameState.players) {
-                gameState.players = {};
+                gameState.players = {} as { [key: string]: PlayerState };
             }
 
             const roomData: Room = {
@@ -360,13 +368,15 @@ export const updatePlayerProgress = async (
     roomId: string,
     userId: string,
     progress: number,
-    score: number
+    score: number,
+    totalProgress: number
 ): Promise<boolean> => {
     try {
         const roomRef = doc(db, ROOMS_COLLECTION, roomId);
         await updateDoc(roomRef, {
             [`gameState.players.${userId}.progress`]: progress,
-            [`gameState.players.${userId}.score`]: score
+            [`gameState.players.${userId}.score`]: score,
+            [`gameState.players.${userId}.totalProgress`]: totalProgress
         });
         return true;
     } catch (error) {

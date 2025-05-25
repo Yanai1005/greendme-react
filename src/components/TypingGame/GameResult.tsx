@@ -7,7 +7,7 @@ type GameResultProps = {
 };
 
 const GameResult = (props: GameResultProps) => {
-    const { isNotFoundEnding, typingText, endReason, room, userId } = props;
+    const { isNotFoundEnding, typingText, room } = props;
 
     const isGameCompleted = () => {
         if (!room?.gameState?.players) return false;
