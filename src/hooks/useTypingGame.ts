@@ -175,27 +175,36 @@ export const useTypingGame = ({
             console.error("Error updating progress in Firebase:", err);
         }
 
+        // 入力が完全に一致した場合
         if (inputValue === typingText) {
-            console.log("Question completed:", typingText);
+            // 最後の問題かどうかをチェック
+            const isLastQuestion = currentSetIndex === QUESTION_SETS.length - 1 &&
+                currentQuestionIndex === QUESTION_SETS[currentSetIndex].length - 1;
 
-            // git push -f origin mainの場合はNot Found
-            if (typingText === 'git push -f origin main') {
-                console.log("Showing Not Found for force push");
-                setIsNotFoundEnding(true);
-                setGameStatus('finished');
+            if (isLastQuestion) {
+                // 最後の問題が完了した場合、ゲームを終了状態にする
                 try {
-                    await updatePlayerState(100, score, currentSetIndex, currentQuestionIndex);
-                } catch (err) {
-                    console.error("Error updating final progress:", err);
-                }
+                    const roomRef = doc(db, 'rooms', roomId);
+                    await updateDoc(roomRef, {
+                        'gameState.status': 'finished',
+                        'gameState.endTime': Date.now(),
+                        [`gameState.players.${userId}.completed`]: true
+                    });
 
-                if (dataChannel.current?.readyState === 'open') {
-                    dataChannel.current.send(JSON.stringify({
-                        type: 'notFound',
-                        timestamp: Date.now()
-                    }));
+                    setGameStatus('finished');
+
+                    // 相手にゲーム終了を通知
+                    if (dataChannel.current?.readyState === 'open') {
+                        dataChannel.current.send(JSON.stringify({
+                            type: 'gameFinished',
+                            timestamp: Date.now()
+                        }));
+                    }
+                } catch (err) {
+                    console.error("Failed to update game status to finished:", err);
                 }
             } else {
+                // 通常の問題完了処理
                 console.log("Question completed, moving to next question");
 
                 let nextSetIndex = currentSetIndex;
@@ -242,7 +251,7 @@ export const useTypingGame = ({
                             progress: 0,
                             score: score,
                             totalProgress: newTotalProgress,
-                            completed: true,
+                            completed: false,
                             timestamp: Date.now()
                         }));
                     }
@@ -261,7 +270,8 @@ export const useTypingGame = ({
         updatePlayerState,
         calculateTotalProgress,
         roomId,
-        userId
+        userId,
+        dataChannel
     ]);
 
     useEffect(() => {
@@ -291,6 +301,56 @@ export const useTypingGame = ({
             }
         }
     }, [gameStatus, isReady, otherPlayerId, room, roomId, startTime]);
+
+    // WebRTCメッセージハンドラを追加
+    useEffect(() => {
+        if (dataChannel.current) {
+            const handleMessage = async (event: MessageEvent) => {
+                const data = JSON.parse(event.data);
+                console.log("Received WebRTC message:", data.type);
+
+                if (data.type === 'gameFinished' || (data.type === 'progress' && data.completed)) {
+                    try {
+                        // まずFirestoreを更新
+                        const roomRef = doc(db, 'rooms', roomId);
+                        await updateDoc(roomRef, {
+                            'gameState.status': 'finished',
+                            'gameState.endTime': Date.now(),
+                            [`gameState.players.${otherPlayerId}.completed`]: true
+                        });
+
+                        // ローカルの状態を更新
+                        setGameStatus('finished');
+
+                        // 完了通知を再送信（確実に相手に届くように）
+                        if (dataChannel.current?.readyState === 'open') {
+                            dataChannel.current.send(JSON.stringify({
+                                type: 'gameFinished',
+                                timestamp: Date.now(),
+                                retry: true
+                            }));
+                        }
+
+                        console.log("Game state updated to finished");
+                    } catch (err) {
+                        console.error("Error updating game status to finished:", err);
+                    }
+                }
+            };
+
+            dataChannel.current.addEventListener('message', handleMessage);
+            return () => {
+                dataChannel.current?.removeEventListener('message', handleMessage);
+            };
+        }
+    }, [dataChannel, roomId, otherPlayerId]);
+
+    // ゲーム状態の監視を追加
+    useEffect(() => {
+        if (room?.gameState?.status === 'finished') {
+            setGameStatus('finished');
+        }
+    }, [room?.gameState?.status]);
 
     return {
         typingText,

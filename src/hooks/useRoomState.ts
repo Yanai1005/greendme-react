@@ -43,12 +43,19 @@ export const useRoomState = ({
                             ready: true,
                             progress: 0,
                             score: 0,
-                            totalProgress: 0
+                            totalProgress: 0,
+                            completed: false
                         };
                     }
                     updatedGameState.players[otherPlayerId].progress = data.progress;
                     updatedGameState.players[otherPlayerId].score = data.score || 0;
                     updatedGameState.players[otherPlayerId].totalProgress = data.totalProgress || 0;
+                    if (data.completed !== undefined) {
+                        updatedGameState.players[otherPlayerId].completed = data.completed;
+                        // 相手が完了した場合、ゲーム状態をfinishedに更新
+                        updatedGameState.status = 'finished';
+                        updatedGameState.endTime = Date.now();
+                    }
 
                     setRoom(prev => {
                         if (!prev) return null;
@@ -59,6 +66,35 @@ export const useRoomState = ({
                     });
 
                     console.log("Updated game state with peer progress");
+                }
+            } else if (data.type === 'gameFinished') {
+                // 相手がゲームを完了した場合の処理
+                if (otherPlayerId && room?.gameState?.players) {
+                    const updatedGameState = { ...room.gameState };
+                    if (!updatedGameState.players[otherPlayerId]) {
+                        updatedGameState.players[otherPlayerId] = {
+                            ready: true,
+                            progress: 0,
+                            score: 0,
+                            totalProgress: 0,
+                            completed: true
+                        };
+                    } else {
+                        updatedGameState.players[otherPlayerId].completed = true;
+                    }
+                    // ゲーム状態をfinishedに更新
+                    updatedGameState.status = 'finished';
+                    updatedGameState.endTime = Date.now();
+
+                    setRoom(prev => {
+                        if (!prev) return null;
+                        return {
+                            ...prev,
+                            gameState: updatedGameState
+                        };
+                    });
+
+                    console.log("Updated game state with peer completion");
                 }
             } else if (data.type === 'connected') {
                 console.log(" Received connection confirmation from peer:", data.userId);
@@ -102,13 +138,7 @@ export const useRoomState = ({
             return false;
         }
 
-        // ゲーム状態が終了状態でないことを確認（playing状態でもWebRTC接続は必要）
-        const gameStatus = roomData.gameState?.status;
-        if (gameStatus === 'finished') {
-            console.log(` Game status not suitable for WebRTC: ${gameStatus}`);
-            return false;
-        }
-
+        // ゲーム状態に関係なく、WebRTC接続を維持
         console.log(" All conditions met for WebRTC initialization");
         return true;
     }, []);

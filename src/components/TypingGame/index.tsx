@@ -197,6 +197,8 @@ const TypingGame = (props: TypingGameProps) => {
                 <GameResult
                     isNotFoundEnding={isNotFoundEnding}
                     typingText={typingText}
+                    room={room}
+                    userId={userId}
                 />
             )}
 

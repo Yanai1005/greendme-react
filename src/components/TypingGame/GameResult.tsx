@@ -2,20 +2,26 @@ type GameResultProps = {
     isNotFoundEnding: boolean;
     typingText: string;
     endReason?: string | null;
+    room: any;
+    userId: string;
 };
 
 const GameResult = (props: GameResultProps) => {
-    const { isNotFoundEnding, typingText, endReason } = props;
+    const { isNotFoundEnding, typingText, endReason, room, userId } = props;
 
-    if (isNotFoundEnding || typingText === 'git push -f origin main') {
+    const isGameCompleted = () => {
+        if (!room?.gameState?.players) return false;
+        const players = room.gameState.players;
+        const playerIds = Object.keys(players);
+
+        return playerIds.some(playerId => players[playerId]?.completed);
+    };
+
+    if (isNotFoundEnding || typingText === 'git push -f origin main' || isGameCompleted()) {
         return (
             <div className="game-result bg-gray-100 p-6 rounded-lg shadow-md text-center">
-                <h3 className="text-xl font-bold text-red-600 mb-2">Not Found</h3>
-                <p className="mb-4">このコマンドは実行できません</p>
-                {endReason && <p className="text-sm text-gray-600 mt-2 mb-4">{endReason}</p>}
-
                 <div className="mt-4 flex flex-col items-center">
-                    <p className="text-sm font-medium mb-3">カメラで読み取ってください:</p>
+                    <p className="text-sm font-medium mb-3">Errorが発生しました</p>
                     <img
                         src="https://qr-official.line.me/gs/M_746wkmkl_GW.png"
                         alt="LINE QR Code"
@@ -28,8 +34,8 @@ const GameResult = (props: GameResultProps) => {
 
     return (
         <div className="game-result bg-gray-100 p-6 rounded-lg shadow-md text-center">
-            <h3 className="text-xl font-bold text-green-600 mb-2">ゲーム終了</h3>
-            <p className="mb-4">おつかれさまでした！</p>
+            <h3 className="text-2xl font-bold text-green-600 mb-4">ゲーム終了</h3>
+            <p className="text-lg">おつかれさまでした！</p>
         </div>
     );
 };

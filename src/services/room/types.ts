@@ -21,11 +21,12 @@ export interface GameState {
 
 export interface PlayerState {
     ready: boolean;
-    score: number;
     progress: number;
-    totalProgress?: number;
+    score: number;
+    totalProgress: number;
     currentSetIndex?: number;
     currentQuestionIndex?: number;
+    completed?: boolean;
 }
 
 export type RTCConnectionData = {
