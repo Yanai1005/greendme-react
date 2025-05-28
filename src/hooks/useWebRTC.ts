@@ -42,11 +42,19 @@ export const useWebRTC = ({
     const initializationDelay = useRef<NodeJS.Timeout | null>(null);
     const connectionTimeout = useRef<NodeJS.Timeout | null>(null);
 
-    // ICE設定
+    // ICE設定（STUNとTURNサーバーを含む）
     const iceServers = [
+        // STUNサーバー（NAT越えのためのパブリックIPアドレス取得）
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
+
+        // TURNサーバー（直接接続できない場合のリレーサーバー）
+        {
+            urls: 'turn:my-turn-server.mycompany.com:19403',
+            username: 'optional-username',
+            credential: 'auth-token'
+        },
     ];
 
     const sendMessage = useCallback((message: object): boolean => {
@@ -146,6 +154,7 @@ export const useWebRTC = ({
         }
 
         console.log(`Starting WebRTC initialization as ${isHost ? 'HOST' : 'GUEST'} with player:`, otherPlayerId);
+        console.log(`ICE servers configured:`, iceServers.map(server => server.urls).join(', '));
 
         setConnectionState('initializing');
         setConnectionError(null);
@@ -157,13 +166,13 @@ export const useWebRTC = ({
             const pc = new RTCPeerConnection({
                 iceServers,
                 iceCandidatePoolSize: 10,
-                iceTransportPolicy: 'all',
+                iceTransportPolicy: 'all', // 'relay'にするとTURNサーバーのみを使用
                 bundlePolicy: 'max-bundle',
                 rtcpMuxPolicy: 'require'
             });
             peerConnection.current = pc;
 
-            console.log("RTCPeerConnection created successfully");
+            console.log("RTCPeerConnection created successfully with TURN server support");
 
             // 接続状態の詳細な監視
             pc.oniceconnectionstatechange = () => {
@@ -186,7 +195,7 @@ export const useWebRTC = ({
                         break;
                     case 'failed':
                         setIsConnected(false);
-                        setConnectionError(`ICE接続が失敗しました`);
+                        setConnectionError(`ICE接続が失敗しました - TURNサーバーへの接続も試行されました`);
                         setConnectionState('failed');
                         break;
                     case 'disconnected':
@@ -206,13 +215,27 @@ export const useWebRTC = ({
             };
 
             pc.onconnectionstatechange = () => {
-                console.log(" Connection state:", pc.connectionState);
+                console.log("Connection state:", pc.connectionState);
             };
 
-            // ICE候補の処理
+            // ICE候補の処理（TURNサーバー経由の候補も含む）
             pc.onicecandidate = async (event) => {
                 if (event.candidate) {
-                    console.log(" ICE candidate generated:", event.candidate.type);
+                    console.log("ICE candidate generated:", {
+                        type: event.candidate.type,
+                        protocol: event.candidate.protocol,
+                        relatedAddress: event.candidate.relatedAddress,
+                        relatedPort: event.candidate.relatedPort
+                    });
+
+                    // TURN候補かどうかを判定
+                    if (event.candidate.type === 'relay') {
+                        console.log("🔄 TURN relay candidate generated - using TURN server");
+                    } else if (event.candidate.type === 'srflx') {
+                        console.log("🌐 STUN reflexive candidate generated");
+                    } else if (event.candidate.type === 'host') {
+                        console.log("🏠 Host candidate generated");
+                    }
 
                     try {
                         let currentData: RTCConnectionData = { candidates: [] };
@@ -241,20 +264,20 @@ export const useWebRTC = ({
                         currentData.candidates = [serializedCandidate];
                         await saveRTCData(roomId, userId, currentData);
                     } catch (error) {
-                        console.error(" Error saving ICE candidate:", error);
+                        console.error("Error saving ICE candidate:", error);
                     }
                 } else {
-                    console.log(" ICE gathering complete");
+                    console.log("ICE gathering complete");
                 }
             };
 
-            // 接続タイムアウト設定
+            // 接続タイムアウト設定（TURNサーバーを使用する場合は少し長めに設定）
             connectionTimeout.current = setTimeout(() => {
                 if (connectionState !== 'connected') {
-                    console.log("Connection timeout, triggering reset");
+                    console.log("Connection timeout, triggering reset (TURN server connection may take longer)");
                     resetConnection();
                 }
-            }, 30000);
+            }, 45000); // TURNサーバー使用時を考慮して45秒に延長
 
             const handleChannelOpen = () => {
                 console.log('Data channel opened successfully');
@@ -309,7 +332,8 @@ export const useWebRTC = ({
                 await pc.setLocalDescription(offer);
                 console.log("Offer created and set as local description");
 
-                await new Promise(resolve => setTimeout(resolve, 2000));
+                // ICE gathering完了まで待機（TURNサーバーの候補も含める）
+                await new Promise(resolve => setTimeout(resolve, 3000));
 
                 const finalOffer = pc.localDescription;
                 if (finalOffer) {
@@ -322,10 +346,10 @@ export const useWebRTC = ({
                         offer: serializedOffer,
                         candidates: []
                     });
-                    console.log("Offer saved successfully");
+                    console.log("Offer saved successfully with TURN server candidates");
                 }
             } else {
-                console.log(" Setting up GUEST role");
+                console.log("Setting up GUEST role");
 
                 // ゲスト側はデータチャネルを受信
                 pc.ondatachannel = (event) => {
@@ -343,7 +367,7 @@ export const useWebRTC = ({
             setConnectionState('connecting');
         } catch (error) {
             console.error("Error initializing WebRTC:", error);
-            setConnectionError("WebRTC接続の初期化に失敗しました");
+            setConnectionError("WebRTC接続の初期化に失敗しました（TURNサーバー設定を確認してください）");
             setConnectionState('failed');
             rtcInitialized.current = false;
         }
@@ -415,7 +439,7 @@ export const useWebRTC = ({
                 return;
             }
 
-            console.log(" RTC data received:", Object.keys(data));
+            console.log("RTC data received:", Object.keys(data));
 
             try {
                 const pc = peerConnection.current;
@@ -428,7 +452,7 @@ export const useWebRTC = ({
                             type: data.answer.type as RTCSdpType,
                             sdp: data.answer.sdp
                         });
-                        console.log(" Remote description (answer) set successfully");
+                        console.log("Remote description (answer) set successfully");
 
                         await processQueuedIceCandidates();
                     }
@@ -448,7 +472,8 @@ export const useWebRTC = ({
                         await pc.setLocalDescription(answer);
                         console.log("📤 Answer created and set as local description");
 
-                        await new Promise(resolve => setTimeout(resolve, 1000));
+                        // TURNサーバーの候補も含めるため少し長めに待機
+                        await new Promise(resolve => setTimeout(resolve, 2000));
 
                         const finalAnswer = pc.localDescription;
                         if (finalAnswer) {
@@ -461,7 +486,7 @@ export const useWebRTC = ({
                                 answer: serializedAnswer,
                                 candidates: []
                             });
-                            console.log(" Answer saved successfully");
+                            console.log("Answer saved successfully with TURN server candidates");
                         }
                     }
                 }
@@ -475,7 +500,7 @@ export const useWebRTC = ({
                             const candidate = new RTCIceCandidate(candidateData);
                             addIceCandidateToQueue(candidate);
                         } catch (icErr) {
-                            console.warn(" Error processing ICE candidate:", icErr);
+                            console.warn("Error processing ICE candidate:", icErr);
                         }
                     }
                 }
